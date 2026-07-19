@@ -1,0 +1,32 @@
+{
+  "name": "@archisynapse/ledger",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest",
+    "lint": "eslint . --ext .ts"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "pg": "^8.13.0",
+    "redis": "^4.7.0",
+    "zod": "^3.24.0",
+    "uuid": "^11.1.0",
+    "helmet": "^8.0.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/pg": "^8.11.0",
+    "@types/cors": "^2.8.17",
+    "@types/uuid": "^10.0.0",
+    "tsx": "^4.19.0",
+    "vitest": "^3.1.0",
+    "typescript": "^5.6.0"
+  }
+}

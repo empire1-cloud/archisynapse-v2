@@ -1,0 +1,30 @@
+{
+  "name": "archisynapse",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Intelligent Payment Infrastructure",
+  "workspaces": [
+    "services/*",
+    "ai/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run dev:transaction\" \"npm run dev:ledger\"",
+    "dev:transaction": "npm run dev --workspace=services/transaction",
+    "dev:ledger": "npm run dev --workspace=services/ledger",
+    "build": "npm run build --workspaces",
+    "test": "npm run test --workspaces",
+    "lint": "eslint . --ext .ts",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "concurrently": "^9.0.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
