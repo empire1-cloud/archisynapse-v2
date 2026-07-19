@@ -78,5 +78,20 @@ services:
       redis:
         condition: service_healthy
 
+  analytics-service:
+    build:
+      context: .
+      dockerfile: services/analytics/Dockerfile
+    ports:
+      - "8081:8081"
+    environment:
+      ARCHISYNAPSE_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/archisynapse
+      ARCHISYNAPSE_PEPPER: ${ARCHISYNAPSE_PEPPER:-dev-only-insecure-pepper}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
 volumes:
   postgres_data:
