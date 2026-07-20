@@ -28,9 +28,13 @@ const authenticateOrg = (req: Request, res: Response, next: NextFunction) => {
   if (!orgId) {
     return res.status(401).json({ error: 'Missing X-Organization-ID header' });
   }
-  const { error } = Joi.string().uuid().validate(orgId);
+  // organization_id is TEXT in Postgres (migration 003 -- merchant/tenant
+  // ids are strings like "mer_int_..." or "lyrica", not UUIDs). A plain
+  // non-empty string check is a strict superset of the old UUID-only
+  // check: every valid UUID still passes; royalty tenant ids now do too.
+  const { error } = Joi.string().min(1).max(255).validate(orgId);
   if (error) {
-    return res.status(400).json({ error: 'X-Organization-ID must be a valid UUID' });
+    return res.status(400).json({ error: 'X-Organization-ID must be a non-empty string' });
   }
   (req as any).organizationId = orgId;
   next();

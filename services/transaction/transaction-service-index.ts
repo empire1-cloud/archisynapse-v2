@@ -4,6 +4,9 @@ import pino from 'pino';
 import { initTransactionAPI } from './transaction-service-api';
 import { TransactionService } from './transaction-service-core';
 import { LedgerClient } from './transaction-service-ledger-client';
+import { initRoyaltyAPI } from './royalty-service-api';
+import { RoyaltyService } from './royalty-service-core';
+import { RoyaltyLedgerClient } from './royalty-service-ledger-client';
 
 const logger = pino();
 const PORT = parseInt(process.env.PORT || '3000', 10);
@@ -37,7 +40,13 @@ async function main() {
     platformFeeRevenueAccountId: process.env.LEDGER_PLATFORM_FEE_REVENUE_ACCOUNT_ID || '',
   });
 
+  const royaltyLedgerClient = new RoyaltyLedgerClient(
+    process.env.LEDGER_SERVICE_URL || 'http://127.0.0.1:3001'
+  );
+  const royaltyService = new RoyaltyService(pool, royaltyLedgerClient);
+
   const app = initTransactionAPI(transactionService);
+  app.use(initRoyaltyAPI(royaltyService));
   const server = app.listen(PORT, () => {
     logger.info(`Transaction Service listening on http://127.0.0.1:${PORT}`);
   });
