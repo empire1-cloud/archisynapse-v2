@@ -73,6 +73,9 @@ class Transaction(Base):
     status = Column(String, index=True)  # completed, failed, refunded
     payment_method = Column(String, nullable=True)
     country = Column(String, nullable=True)
+    correlation_id = Column(String, index=True, nullable=True)
+    event_id = Column(String, index=True, nullable=True)
+    external_transaction_id = Column(String, index=True, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, index=True)
 
     __table_args__ = (
@@ -142,6 +145,9 @@ class TransactionIn(BaseModel):
     status: str = "completed"
     payment_method: Optional[str] = None
     country: Optional[str] = None
+    correlation_id: Optional[str] = None
+    event_id: Optional[str] = None
+    external_transaction_id: Optional[str] = None
 
 class SubscriptionIn(BaseModel):
     customer_id: str
@@ -746,11 +752,45 @@ def record_transaction(
         currency=event.currency,
         status=event.status,
         payment_method=event.payment_method,
-        country=event.country
+        country=event.country,
+        correlation_id=event.correlation_id,
+        event_id=event.event_id,
+        external_transaction_id=event.external_transaction_id,
     )
     db.add(tx)
     db.commit()
     return {"status": "recorded", "transaction_id": tx.id}
+
+
+@app.get("/transactions/{transaction_id}")
+def get_transaction(
+    transaction_id: int,
+    merchant: Merchant = Depends(get_current_merchant),
+    db: Session = Depends(get_db)
+):
+    tx = db.query(Transaction).filter(
+        Transaction.id == transaction_id,
+        Transaction.merchant_id == merchant.merchant_id
+    ).first()
+
+    if not tx:
+        raise HTTPException(status_code=404, detail="Transaction not found")
+
+    return {
+        "id": tx.id,
+        "merchant_id": tx.merchant_id,
+        "customer_id": tx.customer_id,
+        "amount": tx.amount,
+        "fee_amount": tx.fee_amount,
+        "currency": tx.currency,
+        "status": tx.status,
+        "payment_method": tx.payment_method,
+        "country": tx.country,
+        "correlation_id": tx.correlation_id,
+        "event_id": tx.event_id,
+        "external_transaction_id": tx.external_transaction_id,
+        "created_at": tx.created_at.isoformat() if tx.created_at else None,
+    }
 
 
 @app.post("/subscriptions")

@@ -1,6 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { Decimal } from 'decimal.js';
-import { createLogger } from 'pino';
+import pino from 'pino';
 import pinoHttp from 'pino-http';
 import Joi from 'joi';
 
@@ -13,7 +13,7 @@ import {
   TransactionType,
 } from './ledger-service-types';
 
-const logger = createLogger();
+const logger = pino();
 const app = express();
 
 // Middleware
@@ -22,6 +22,9 @@ app.use(pinoHttp({ logger }));
 
 // Auth middleware (stub: replace with real auth)
 const authenticateOrg = (req: Request, res: Response, next: NextFunction) => {
+  if (req.path === '/health' || req.path === '/ready') {
+    return next();
+  }
   const orgId = req.headers['x-organization-id'] as string;
   if (!orgId) {
     return res.status(401).json({ error: 'Missing X-Organization-ID header' });
@@ -36,6 +39,16 @@ app.use(authenticateOrg);
  * Initialize ledger service (inject your DB pool here)
  */
 export function initLedgerAPI(ledgerService: LedgerService) {
+  app.get('/accounts', async (req: Request, res: Response) => {
+    try {
+      const accounts = await ledgerService.listAccounts((req as any).organizationId);
+      res.json(accounts);
+    } catch (err) {
+      logger.error(err, 'Failed to list accounts');
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   /**
    * POST /accounts
    * Create a new account in the chart of accounts
@@ -177,7 +190,7 @@ export function initLedgerAPI(ledgerService: LedgerService) {
 
       const reversedTxn = await ledgerService.reverseTransaction(
         (req as any).organizationId,
-        req.params.id,
+        req.params.id as string,
         value.reason
       );
 
@@ -193,6 +206,22 @@ export function initLedgerAPI(ledgerService: LedgerService) {
     }
   });
 
+  app.get('/transactions/:id', async (req: Request, res: Response) => {
+    try {
+      const transaction = await ledgerService.getTransaction(
+        (req as any).organizationId,
+        req.params.id as string
+      );
+      res.json(transaction);
+    } catch (err: any) {
+      logger.error(err, 'Failed to fetch transaction');
+      if (err.message.includes('not found')) {
+        return res.status(404).json({ error: err.message });
+      }
+      res.status(500).json({ error: 'Internal server error' });
+    }
+  });
+
   /**
    * GET /trial-balance
    * Get the trial balance (all accounts with debit/credit sums)
@@ -200,10 +229,14 @@ export function initLedgerAPI(ledgerService: LedgerService) {
   app.get('/trial-balance', async (req: Request, res: Response) => {
     try {
       const trialBalance = await ledgerService.getTrialBalance((req as any).organizationId);
+      const totalBalance = trialBalance.reduce(
+        (sum, tb) => sum.plus(tb.balance),
+        new Decimal(0)
+      );
       res.json({
         asOf: new Date(),
         accounts: trialBalance,
-        isBalanced: trialBalance.every((tb) => tb.balance.equals(0)),
+        isBalanced: totalBalance.equals(0),
       });
     } catch (err) {
       logger.error(err, 'Failed to fetch trial balance');

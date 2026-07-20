@@ -1,9 +1,9 @@
 import { Pool } from 'pg';
-import { createLogger } from 'pino';
+import pino from 'pino';
 import { initLedgerAPI } from './ledger-service-api';
 import { LedgerService } from './ledger-service-core';
 
-const logger = createLogger();
+const logger = pino();
 
 /**
  * Archisynapse Ledger Service
@@ -66,11 +66,8 @@ async function main() {
   // Start HTTP server
   const server = app.listen(PORT, () => {
     logger.info(
-      `Ledger Service listening on http://localhost:${PORT}`,
-      {
-        nodeEnv: NODE_ENV,
-        dbHost: process.env.DB_HOST || 'localhost',
-      }
+      { nodeEnv: NODE_ENV, dbHost: process.env.DB_HOST || 'localhost' },
+      `Ledger Service listening on http://localhost:${PORT}`
     );
   });
 

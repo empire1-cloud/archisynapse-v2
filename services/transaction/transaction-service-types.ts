@@ -51,6 +51,7 @@ export interface CreatePaymentRequest {
   organizationId: string;
   customerId?: string;
   amount: Decimal;
+  feeAmount?: Decimal;
   currency: string;
   paymentMethod: PaymentMethod;
   description?: string;

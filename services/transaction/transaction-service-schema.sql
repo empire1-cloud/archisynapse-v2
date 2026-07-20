@@ -10,6 +10,7 @@ CREATE TABLE payments (
   organization_id UUID NOT NULL,
   customer_id UUID,
   amount NUMERIC(19, 4) NOT NULL CHECK (amount > 0),
+  fee_amount NUMERIC(19, 4) NOT NULL DEFAULT 0 CHECK (fee_amount >= 0),
   currency VARCHAR(3) NOT NULL DEFAULT 'USD',
   status VARCHAR(20) NOT NULL DEFAULT 'PENDING'
     CHECK (status IN ('PENDING', 'AUTHORIZED', 'SUCCEEDED', 'FAILED', 'REFUNDED', 'PARTIALLY_REFUNDED', 'DISPUTED')),
@@ -47,6 +48,24 @@ CREATE TABLE refunds (
 
 CREATE INDEX idx_refunds_payment_id ON refunds(payment_id);
 CREATE INDEX idx_refunds_organization_id ON refunds(organization_id);
+
+CREATE TABLE unposted_payments (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  organization_id UUID NOT NULL,
+  payment_id UUID NOT NULL REFERENCES payments(id) ON DELETE CASCADE,
+  idempotency_key VARCHAR(255) NOT NULL UNIQUE,
+  gross_amount NUMERIC(19, 4) NOT NULL CHECK (gross_amount > 0),
+  fee_amount NUMERIC(19, 4) NOT NULL DEFAULT 0 CHECK (fee_amount >= 0),
+  net_amount NUMERIC(19, 4) NOT NULL CHECK (net_amount >= 0),
+  currency VARCHAR(3) NOT NULL DEFAULT 'USD',
+  reference_id VARCHAR(255) NOT NULL,
+  metadata JSONB,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_unposted_payments_organization_id ON unposted_payments(organization_id);
+CREATE INDEX idx_unposted_payments_payment_id ON unposted_payments(payment_id);
+CREATE INDEX idx_unposted_payments_reference_id ON unposted_payments(reference_id);
 
 -- Guard: a payment can never be refunded for more than its original amount
 -- (enforced in application logic since it requires summing across rows;

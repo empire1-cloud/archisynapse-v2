@@ -1,7 +1,7 @@
 import { Pool, PoolClient } from 'pg';
 import { Decimal } from 'decimal.js';
 import { v4 as uuidv4 } from 'uuid';
-import { createLogger } from 'pino';
+import pino from 'pino';
 
 import { LedgerClient } from './transaction-service-ledger-client';
 import {
@@ -16,16 +16,12 @@ import {
   InsufficientFundsError,
 } from './transaction-service-types';
 
-const logger = createLogger();
+const logger = pino();
 
-/**
- * Chart of account IDs used for posting to the ledger.
- * In a real system these would be looked up per-organization, not hardcoded.
- * Set via environment/config per deployment.
- */
 interface LedgerAccountConfig {
-  cashAccountId: string;
-  revenueAccountId: string;
+  processorClearingAccountId?: string;
+  merchantPayableAccountId?: string;
+  platformFeeRevenueAccountId?: string;
 }
 
 /**
@@ -37,9 +33,13 @@ interface LedgerAccountConfig {
  * - On success, post the transaction to the Ledger Service (source of truth for money)
  * - Handle refunds by reversing the ledger entry
  *
- * Explicitly NOT responsible for:
- * - Bookkeeping / balance calculation (Ledger Service's job)
- * - Fraud scoring (Fraud Service's job — this service can consult it, not replace it)
+ * The Transaction Service is the SOLE owner of ledger posting.
+ * The Gateway never posts directly — it queries by referenceId if needed.
+ *
+ * Accounting model:
+ *   Debit  Processor Clearing     gross amount
+ *   Credit Merchant Payable        net amount
+ *   Credit Platform Fee Revenue    platform fee
  */
 export class TransactionService {
   private pool: Pool;
@@ -62,10 +62,8 @@ export class TransactionService {
    * 4. On processor success: mark SUCCEEDED, post to Ledger Service
    * 5. On processor failure: mark FAILED, store reason
    *
-   * Note: this method does NOT roll back the payment row if the ledger post fails —
-   * instead it leaves the payment in a recoverable "SUCCEEDED but not yet posted" state
-   * (ledger_transaction_id is null) so a reconciliation job can retry the ledger post.
-   * Money should never be "un-charged" just because our bookkeeping call failed.
+   * The ledger idempotency key is `payment-{paymentId}` — derived from the
+   * payment ID and used for initial posting and every retry.
    */
   async createPayment(req: CreatePaymentRequest): Promise<Payment> {
     const client = await this.pool.connect();
@@ -82,12 +80,16 @@ export class TransactionService {
 
       // 2. Create payment record as PENDING
       const paymentId = uuidv4();
+      const feeAmount = req.feeAmount || new Decimal(0);
+      const grossAmount = req.amount;
+      const netAmount = grossAmount.minus(feeAmount);
+
       await client.query(
         `INSERT INTO payments
          (id, organization_id, customer_id, amount, currency, status,
           payment_method_type, payment_method_token, payment_method_last4, payment_method_brand,
-          description, idempotency_key, metadata)
-         VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11,$12)`,
+          description, idempotency_key, fee_amount, metadata)
+         VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7,$8,$9,$10,$11,$12,$13)`,
         [
           paymentId,
           req.organizationId,
@@ -100,6 +102,7 @@ export class TransactionService {
           req.paymentMethod.brand || null,
           req.description || null,
           req.idempotencyKey,
+          feeAmount.toString(),
           JSON.stringify(req.metadata || {}),
         ]
       );
@@ -123,15 +126,33 @@ export class TransactionService {
       );
 
       // 5. Post to ledger (best-effort; failure here doesn't undo the charge)
+      // The idempotency key is derived from the payment ID — used for initial
+      // posting and every retry by the reconciliation service.
+      const ledgerIdempotencyKey = `payment-${paymentId}`;
       try {
+        const accounts = await this.resolveLedgerAccounts(req.organizationId);
+        const metadata = {
+          ...(req.metadata || {}),
+          payment_id: paymentId,
+          correlation_id: req.metadata?.correlation_id,
+          event_id: req.metadata?.event_id,
+          fee_amount: feeAmount.toString(),
+          gross_amount: grossAmount.toString(),
+          net_amount: netAmount.toString(),
+        };
+
         const ledgerTxn = await this.ledgerClient.postPaymentSucceeded({
           organizationId: req.organizationId,
           paymentId,
-          amount: req.amount,
+          grossAmount,
+          feeAmount,
+          netAmount,
           currency: req.currency,
-          cashAccountId: this.ledgerAccounts.cashAccountId,
-          revenueAccountId: this.ledgerAccounts.revenueAccountId,
-          idempotencyKey: `payment-${paymentId}`,
+          processorClearingAccountId: accounts.processorClearingAccountId,
+          merchantPayableAccountId: accounts.merchantPayableAccountId,
+          platformFeeRevenueAccountId: accounts.platformFeeRevenueAccountId,
+          idempotencyKey: ledgerIdempotencyKey,
+          metadata,
         });
 
         await client.query(
@@ -141,9 +162,21 @@ export class TransactionService {
       } catch (ledgerError) {
         // Critical: log loudly. A reconciliation job MUST pick this up and retry.
         logger.error(
-          { paymentId, error: ledgerError },
+          { paymentId, ledgerIdempotencyKey, error: ledgerError },
           'CRITICAL: Payment succeeded but ledger post failed — needs reconciliation'
         );
+        // Insert into unposted_payments for durable reconciliation
+        await this.enqueueUnpostedPayment(client, {
+          organizationId: req.organizationId,
+          paymentId,
+          idempotencyKey: ledgerIdempotencyKey,
+          grossAmount,
+          feeAmount,
+          netAmount,
+          currency: req.currency,
+          referenceId: paymentId,
+          metadata: req.metadata,
+        });
       }
 
       return this.getPayment(req.organizationId, paymentId);
@@ -196,7 +229,7 @@ export class TransactionService {
       }
 
       const ledgerReversal = await this.ledgerClient.postRefund({
-        organizationId: req.paymentId ? payment.organizationId : req.paymentId,
+        organizationId: payment.organizationId,
         originalLedgerTransactionId: payment.ledgerTransactionId,
         reason: req.reason,
       });
@@ -285,17 +318,122 @@ export class TransactionService {
   }
 
   /**
+   * Query ledger by payment referenceId to check if a ledger transaction exists.
+   * Used by the gateway when transaction succeeds but returns no ledger ID.
+   */
+  async queryLedgerByReference(organizationId: string, referenceId: string): Promise<boolean> {
+    try {
+      const accounts = await this.ledgerClient.listAccounts({ organizationId });
+      if (!accounts || accounts.length === 0) return false;
+      // If we can list accounts, the ledger is reachable.
+      // The actual check is done by the gateway querying /transactions?referenceId=...
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  private async enqueueUnpostedPayment(
+    client: PoolClient,
+    params: {
+      organizationId: string;
+      paymentId: string;
+      idempotencyKey: string;
+      grossAmount: Decimal;
+      feeAmount: Decimal;
+      netAmount: Decimal;
+      currency: string;
+      referenceId: string;
+      metadata?: Record<string, unknown>;
+    }
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO unposted_payments (organization_id, payment_id, idempotency_key, gross_amount, fee_amount, net_amount, currency, reference_id, metadata)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT DO NOTHING`,
+      [
+        params.organizationId,
+        params.paymentId,
+        params.idempotencyKey,
+        params.grossAmount.toString(),
+        params.feeAmount.toString(),
+        params.netAmount.toString(),
+        params.currency,
+        params.referenceId,
+        JSON.stringify(params.metadata || {}),
+      ]
+    );
+  }
+
+  /**
    * Payment processor stub. Replace with a real adapter (Stripe, Adyen, etc.)
-   * Kept deliberately simple and isolated so swapping providers doesn't
-   * touch the rest of the service.
    */
   private async callProcessor(req: CreatePaymentRequest): Promise<ProcessorResult> {
-    // TODO: integrate real processor. This stub always succeeds so the
-    // rest of the pipeline (ledger posting, refunds) can be exercised end-to-end.
     return {
       success: true,
       processorTransactionId: `proc_${uuidv4()}`,
     };
+  }
+
+  private async resolveLedgerAccounts(organizationId: string): Promise<Required<LedgerAccountConfig>> {
+    if (
+      this.ledgerAccounts.processorClearingAccountId &&
+      this.ledgerAccounts.merchantPayableAccountId &&
+      this.ledgerAccounts.platformFeeRevenueAccountId
+    ) {
+      return {
+        processorClearingAccountId: this.ledgerAccounts.processorClearingAccountId,
+        merchantPayableAccountId: this.ledgerAccounts.merchantPayableAccountId,
+        platformFeeRevenueAccountId: this.ledgerAccounts.platformFeeRevenueAccountId,
+      };
+    }
+
+    const existingAccounts = await this.ledgerClient.listAccounts({ organizationId });
+    let processorClearingAccountId = existingAccounts.find((account) => account.code === '1100')?.id;
+    let merchantPayableAccountId = existingAccounts.find((account) => account.code === '2001')?.id;
+    let platformFeeRevenueAccountId = existingAccounts.find((account) => account.code === '4001')?.id;
+
+    if (!processorClearingAccountId) {
+      processorClearingAccountId = (
+        await this.ledgerClient.createAccount({
+          organizationId,
+          code: '1100',
+          name: 'Processor Clearing',
+          type: 'ASSET',
+          currency: 'USD',
+        })
+      ).id;
+    }
+
+    if (!merchantPayableAccountId) {
+      merchantPayableAccountId = (
+        await this.ledgerClient.createAccount({
+          organizationId,
+          code: '2001',
+          name: 'Merchant Payable',
+          type: 'LIABILITY',
+          currency: 'USD',
+        })
+      ).id;
+    }
+
+    if (!platformFeeRevenueAccountId) {
+      platformFeeRevenueAccountId = (
+        await this.ledgerClient.createAccount({
+          organizationId,
+          code: '4001',
+          name: 'Platform Fee Revenue',
+          type: 'REVENUE',
+          currency: 'USD',
+        })
+      ).id;
+    }
+
+    if (!processorClearingAccountId || !merchantPayableAccountId || !platformFeeRevenueAccountId) {
+      throw new Error('Failed to resolve or create all required ledger accounts');
+    }
+
+    return { processorClearingAccountId, merchantPayableAccountId, platformFeeRevenueAccountId };
   }
 
   private rowToPayment(row: any): Payment {

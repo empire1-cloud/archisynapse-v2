@@ -1,6 +1,6 @@
 import express, { Request, Response, NextFunction } from 'express';
 import { Decimal } from 'decimal.js';
-import { createLogger } from 'pino';
+import pino from 'pino';
 import pinoHttp from 'pino-http';
 import Joi from 'joi';
 
@@ -13,7 +13,7 @@ import {
   InsufficientFundsError,
 } from './transaction-service-types';
 
-const logger = createLogger();
+const logger = pino();
 const app = express();
 
 app.use(express.json());
@@ -21,9 +21,16 @@ app.use(pinoHttp({ logger }));
 
 // Auth middleware (stub: replace with real auth)
 const authenticateOrg = (req: Request, res: Response, next: NextFunction) => {
+  if (req.path === '/health' || req.path === '/ready') {
+    return next();
+  }
   const orgId = req.headers['x-organization-id'] as string;
   if (!orgId) {
     return res.status(401).json({ error: 'Missing X-Organization-ID header' });
+  }
+  const { error } = Joi.string().uuid().validate(orgId);
+  if (error) {
+    return res.status(400).json({ error: 'X-Organization-ID must be a valid UUID' });
   }
   (req as any).organizationId = orgId;
   next();
@@ -42,6 +49,7 @@ export function initTransactionAPI(transactionService: TransactionService) {
       const schema = Joi.object({
         customerId: Joi.string().uuid().optional(),
         amount: Joi.string().regex(/^\d+(\.\d{1,4})?$/).required(),
+        feeAmount: Joi.string().regex(/^\d+(\.\d{1,4})?$/).optional().default('0'),
         currency: Joi.string().length(3).default('USD'),
         paymentMethod: Joi.object({
           type: Joi.string().valid(...Object.values(PaymentMethodType)).required(),
@@ -72,6 +80,7 @@ export function initTransactionAPI(transactionService: TransactionService) {
         organizationId: (req as any).organizationId,
         customerId: value.customerId,
         amount: new Decimal(value.amount),
+        feeAmount: new Decimal(value.feeAmount),
         currency: value.currency,
         paymentMethod: value.paymentMethod,
         description: value.description,
@@ -99,7 +108,7 @@ export function initTransactionAPI(transactionService: TransactionService) {
     try {
       const payment = await transactionService.getPayment(
         (req as any).organizationId,
-        req.params.id
+        req.params.id as string
       );
       res.json(payment);
     } catch (err: any) {
@@ -148,10 +157,10 @@ export function initTransactionAPI(transactionService: TransactionService) {
       }
 
       const idempotencyKey =
-        (req.headers['idempotency-key'] as string) || `refund-${req.params.id}-${Date.now()}`;
+        (req.headers['idempotency-key'] as string) || `refund-${req.params.id as string}-${Date.now()}`;
 
       const refund = await transactionService.refundPayment({
-        paymentId: req.params.id,
+        paymentId: req.params.id as string,
         amount: value.amount ? new Decimal(value.amount) : undefined,
         reason: value.reason,
         idempotencyKey,

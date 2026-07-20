@@ -11,8 +11,7 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./services/transaction/transaction-service-schema.sql:/docker-entrypoint-initdb.d/01-transaction.sql
-      - ./services/ledger/ledger-service-schema.sql:/docker-entrypoint-initdb.d/02-ledger.sql
+      - ./migrations:/docker-entrypoint-initdb.d
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -90,6 +89,25 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  gateway:
+    build:
+      context: .
+      dockerfile: services/gateway/Dockerfile
+    ports:
+      - "9000:9000"
+    environment:
+      FRAUD_URL: http://fraud-service:8000
+      ANALYTICS_URL: http://analytics-service:8081
+      REDIS_URL: redis://redis:6379
+      ARCHISYNAPSE_PEPPER: ${ARCHISYNAPSE_PEPPER:-dev-only-insecure-pepper}
+    depends_on:
+      fraud-service:
+        condition: service_started
+      analytics-service:
+        condition: service_started
       redis:
         condition: service_healthy
 

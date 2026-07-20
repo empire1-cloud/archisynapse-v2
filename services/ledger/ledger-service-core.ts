@@ -1,7 +1,7 @@
 import { Pool, PoolClient } from 'pg';
 import { Decimal } from 'decimal.js';
 import { v4 as uuidv4 } from 'uuid';
-import { createLogger } from 'pino';
+import pino from 'pino';
 import crypto from 'crypto';
 
 import {
@@ -19,7 +19,7 @@ import {
   AuditAction,
 } from './ledger-service-types';
 
-const logger = createLogger();
+const logger = pino();
 
 /**
  * LedgerService: Core double-entry bookkeeping engine
@@ -79,6 +79,18 @@ export class LedgerService {
     } finally {
       client.release();
     }
+  }
+
+  async listAccounts(organizationId: string): Promise<Account[]> {
+    const result = await this.pool.query(
+      `SELECT id, organization_id, code, name, type, balance, currency, is_active, metadata, created_at, updated_at
+       FROM accounts
+       WHERE organization_id = $1
+       ORDER BY code`,
+      [organizationId]
+    );
+
+    return result.rows.map((row) => this.rowToAccount(row));
   }
 
   /**
@@ -282,7 +294,7 @@ export class LedgerService {
       // Create reversal entries (swap debit/credit for each entry)
       const reversalEntries = entriesResult.rows.map((row) => ({
         accountId: row.account_id,
-        debitCredit: row.debit_credit === 'DEBIT' ? 'CREDIT' : 'DEBIT',
+        debitCredit: (row.debit_credit === 'DEBIT' ? 'CREDIT' : 'DEBIT') as DebitCredit,
         amount: new Decimal(row.amount),
         description: `Reversal: ${row.description}`,
       }));
@@ -314,6 +326,44 @@ export class LedgerService {
     } finally {
       client.release();
     }
+  }
+
+  async getTransaction(organizationId: string, transactionId: string): Promise<Transaction> {
+    const txnResult = await this.pool.query(
+      `SELECT id, organization_id, type, reference_id, description, amount, currency, status, metadata, posted_at, created_at, updated_at
+       FROM transactions
+       WHERE id = $1 AND organization_id = $2`,
+      [transactionId, organizationId]
+    );
+
+    if (txnResult.rows.length === 0) {
+      throw new Error(`Transaction ${transactionId} not found`);
+    }
+
+    const entryResult = await this.pool.query(
+      `SELECT id, transaction_id, organization_id, account_id, debit_credit, amount, description, metadata, created_at
+       FROM journal_entries
+       WHERE transaction_id = $1
+       ORDER BY created_at ASC, id ASC`,
+      [transactionId]
+    );
+
+    const row = txnResult.rows[0];
+    return {
+      id: row.id,
+      organizationId: row.organization_id,
+      type: row.type,
+      referenceId: row.reference_id,
+      description: row.description,
+      amount: new Decimal(row.amount),
+      currency: row.currency,
+      status: row.status,
+      entries: entryResult.rows.map((entry) => this.rowToJournalEntry(entry)),
+      metadata: row.metadata,
+      postedAt: row.posted_at,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 
   /**

@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Python virtual environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build outputs
+dist/
+build/
+coverage/
+*.tsbuildinfo
+
+# Databases and backups (local runtime state — never committed)
+*.db
+*.db-journal
+*.db.bak.*
+*.bak
+*.sqlite3
+
+# Runtime-generated secrets, recovery state, and receipts
+**/.runtime/
+services/fraud/proofs/
+services/fraud/protected/
+services/fraud/uploads/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Editor/OS cruft
+.DS_Store
+*.swp
+
+# Logs
+*.log
+npm-debug.log*
