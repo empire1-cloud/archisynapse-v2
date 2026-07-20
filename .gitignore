@@ -41,3 +41,4 @@ services/fraud/uploads/
 # Logs
 *.log
 npm-debug.log*
+.pytest_cache/
