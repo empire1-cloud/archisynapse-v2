@@ -130,9 +130,9 @@ async def main():
             receipt = resp.json()
             assert receipt["status"] in ("processing", "paid"), receipt
             assert receipt["amounts"]["gross"] == "1.2500", receipt
-            assert receipt["amounts"]["platform_fee"] == "0.0400", receipt
-            assert receipt["amounts"]["net"] == "1.2100", receipt
-            assert receipt["payouts"] == [{"owner_id": "cre_a1b2c3", "amount": "1.2100", "state": "paid"}], receipt
+            assert receipt["amounts"]["platform_fee"] == "0.0000", receipt
+            assert receipt["amounts"]["net"] == "1.2500", receipt
+            assert receipt["payouts"] == [{"owner_id": "cre_a1b2c3", "amount": "1.2500", "state": "paid"}], receipt
             first_receipt_id = receipt["receipt_id"]
             first_ledger_txn_id = receipt["ledger_transaction_id"]
             print("AT-01 PASS —", receipt["amounts"], receipt["payouts"])
@@ -164,7 +164,7 @@ async def main():
             assert resp.status_code == 201, f"AT-04 expected 201, got {resp.status_code}: {resp.text}"
             split_receipt = resp.json()
             payouts_by_owner = {p["owner_id"]: p["amount"] for p in split_receipt["payouts"]}
-            assert payouts_by_owner == {"cre_a1b2c3": "0.7300", "cre_d4e5f6": "0.4800"}, split_receipt
+            assert payouts_by_owner == {"cre_a1b2c3": "0.7500", "cre_d4e5f6": "0.5000"}, split_receipt
             print("AT-04 PASS —", payouts_by_owner)
 
             # Tampered signature -> 401 (AT-05 smoke check)

@@ -137,25 +137,20 @@ async def process_obligation_created(
     breakdown = compute_royalty(gross, splits)
 
     organization_id = tenant_id
-    clearing_account_id = await ledger.ensure_account(
-        organization_id, "royalty_clearing", "Royalty Clearing", "EXPENSE"
-    )
-    fee_account_id = await ledger.ensure_account(
-        organization_id, "platform_fee_revenue", "Platform Fee Revenue", "REVENUE"
+    # A royalty.obligation.created event is a promise to pay, not proof
+    # that cash was collected — it posts as an expense/payable, never a
+    # clearing-account movement. royalty_clearing only applies when the
+    # event references an actual captured payment (not modeled in v1).
+    expense_account_id = await ledger.ensure_account(
+        organization_id, "royalty_expense", "Royalty Expense", "EXPENSE"
     )
 
     entries = [
         LedgerEntry(
-            clearing_account_id,
+            expense_account_id,
             "DEBIT",
             format_ledger_amount(gross),
             f"Royalty obligation {event.event_id}",
-        ),
-        LedgerEntry(
-            fee_account_id,
-            "CREDIT",
-            format_ledger_amount(breakdown["platform_fee"]),
-            f"Platform fee for {event.event_id}",
         ),
     ]
     payouts = []

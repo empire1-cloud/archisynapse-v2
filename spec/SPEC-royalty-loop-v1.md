@@ -75,24 +75,27 @@ Signature verification failures are **recorded** (a rejection row with correlati
 
 All arithmetic in integer ten-thousandths (units = value × 10000), matching the v1 monolith ledger convention.
 
-1. **Platform fee:** 290 bps of gross, rounded **half-up to the cent**.
-   `$1.2500 gross → fee = 1.25 × 0.029 = 0.03625 → $0.04. Net = $1.21.`
-2. **Splits:** apply bps to net, floor each share to the cent, then distribute leftover cents by **largest fractional remainder**; ties broken by larger bps, then lexicographic `owner_id`. Deterministic — the same event always yields the same cents.
-   `Net $1.21 at 60/40 → raw 0.7260 / 0.4840 → floor 0.72 / 0.48, leftover $0.01 → remainders .006 > .004 → final $0.73 / $0.48.`
-3. **Invariant:** `sum(payouts) + fee == gross`, always, enforced by a balanced-journal check before commit.
+**`amount.value` is the creator royalty pool, in full. Archisynapse deducts nothing from it.** There is no platform fee in this loop — Lyrica canon is a flat $1.25 per-remix payout to the creator(s), full stop. Empire's separate 70/30 platform-revenue-share policy governs a *different* pricing contract entirely (e.g. subscription or licensing revenue) and MUST NOT be applied to this event unless a distinct, founder-approved contract explicitly states that `amount.value` is gross platform revenue rather than a creator payout. Absent that, treat this section as authoritative: 100% of the pool is owed to creators.
+
+1. **Splits:** apply `bps` directly to the pool (`amount.value`), floor each share to the cent, then distribute any leftover cents by **largest fractional remainder**; ties broken by larger bps, then lexicographic `owner_id`. Deterministic — the same event always yields the same cents. (For splits that divide evenly — e.g. 60/40 of $1.2500 — there is no remainder to distribute; the algorithm still applies, it just has nothing to do.)
+   `$1.2500 at 60/40 → 0.7500 / 0.5000 exactly, no rounding needed.`
+2. **Invariant:** `sum(payouts) == pool`, always, enforced by a balanced-journal check before commit.
+3. **Amounts payload:** `gross` and `net` are both the pool value (no fee separates them in this loop); `platform_fee` stays present in the schema for forward compatibility but is always `"0.0000"` here — see §6.
 
 ## 5. Decision Outcomes & Ledger Effects
 
+A `royalty.obligation.created` event on its own proves nothing was collected — it is a *promise* to pay, not evidence of cash in hand. It therefore posts as an **expense/payable**, not a clearing-account movement. `royalty_clearing` (an asset-side processor account) is only correct when the event carries a reference to an actual captured payment funding the royalty — not modeled in the v1 schema; when it is, ledger effects below switch from `royalty_expense` to `royalty_clearing` for the debit leg.
+
 | Decision | Receipt `status` | Ledger effect |
 |---|---|---|
-| Allow | `processing` → `paid` | DR `royalty_clearing` 1.25 / CR `creator_payable:{owner}` 0.73 + 0.48 / CR `platform_fee_revenue` 0.04 |
-| Hold | `held` | DR `royalty_clearing` 1.25 / CR `royalty_held_liability` 1.25 (obligation recorded, no payable created, no money moves) |
+| Allow | `processing` → `paid` | DR `royalty_expense` 1.25 / CR `creator_payable:{owner}` 0.75 + 0.50 |
+| Hold | `held` | DR `royalty_expense` 1.25 / CR `royalty_held_liability` 1.25 (obligation recorded, no payable created, no money moves) |
 | Block | `blocked` | No financial entries. Decision + reasons persisted with correlation_id |
-| Release (of held) | `processing` → `paid` | Reclass: DR `royalty_held_liability` / CR payables + fee, same event_id, no new obligation |
+| Release (of held) | `processing` → `paid` | Reclass: DR `royalty_held_liability` / CR payables, same event_id, no new obligation |
 | Reversal | `reversed` | Linked reversing entries (existing v2 reversal semantics); post-reversal trial balance delta = 0 |
 
-**Hold release:** `POST /api/v1/events/{event_id}/release` — authorized via SLA113 policy role only; idempotent (releasing twice pays once); `409 invalid_state` if not held.
-**Reversal:** Lyrica emits `royalty.obligation.reversed` with `reverses_event_id`, its own `idempotency_key`, same `correlation_id`.
+**Hold release:** `POST /api/v1/events/{event_id}/release` — authorized via SLA113 policy role only. Idempotent: the first authorized call pays; every subsequent call (any number of times) returns `200` with the *same stored receipt* — never a second payment, and never a `409` for a call that's simply repeating a released event. `409 invalid_state` is reserved for releasing an event that was never held (blocked, allowed, or unknown) in the first place.
+**Reversal:** Lyrica emits `royalty.obligation.reversed` with `reverses_event_id`, its own `idempotency_key`, same `correlation_id`. Idempotent the same way: retrying a reversal returns `200` with the original reversal receipt, never a second reversing entry.
 
 ## 6. Unified Receipt Schema (v1)
 
@@ -111,12 +114,12 @@ Returned synchronously (v1) as the response body; identical object retrievable a
   "amounts": {
     "currency": "USD",
     "gross": "1.2500",
-    "platform_fee": "0.0400",
-    "net": "1.2100"
+    "platform_fee": "0.0000",
+    "net": "1.2500"
   },
   "payouts": [
-    { "owner_id": "cre_a1b2c3", "amount": "0.7300", "state": "paid" },
-    { "owner_id": "cre_d4e5f6", "amount": "0.4800", "state": "paid" }
+    { "owner_id": "cre_a1b2c3", "amount": "0.7500", "state": "paid" },
+    { "owner_id": "cre_d4e5f6", "amount": "0.5000", "state": "paid" }
   ],
   "decision": {
     "policy": "allow",
@@ -128,7 +131,18 @@ Returned synchronously (v1) as the response body; identical object retrievable a
 }
 ```
 
-`status` ∈ {`processing`, `paid`, `held`, `blocked`, `reversed`, `rejected`}. Lyrica's Earnings screen maps these 1:1 to creator-facing labels (Royalty earned / Payout processing / Paid / Held for risk review / Blocked / Reversed). Receipts are signed by Archisynapse so Lyrica (and creators) can verify them independently.
+`status` ∈ {`processing`, `paid`, `held`, `blocked`, `reversed`, `rejected`} — exhaustive, all six values map to a receipt-driven UI label:
+
+| `status` | Creator-facing label |
+|---|---|
+| `processing` | Payout processing |
+| `paid` | Paid *(the "Royalty earned $X" toast is copy shown alongside this state, not a distinct status value)* |
+| `held` | Held for risk review |
+| `blocked` | Blocked |
+| `reversed` | Reversed |
+| `rejected` | Rejected |
+
+Receipts are signed by Archisynapse so Lyrica (and creators) can verify them independently.
 
 ## 7. Error Codes
 
