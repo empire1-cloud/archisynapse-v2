@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from canonical_event import PaymentRequest, UnifiedReceipt
 from orchestrator import orchestrator
+from royalty_routes import close_royalty_ledger_client, royalty_router
 from runtime_state import (
     load_merchant_credentials,
     save_merchant_credentials,
@@ -34,6 +35,7 @@ app = FastAPI(
     description="Revenue Assurance Loop v1 - Canonical Event Processing",
     version="1.0.0",
 )
+app.include_router(royalty_router)
 
 receipt_store: Dict[str, UnifiedReceipt] = {}
 correlation_store: Dict[str, str] = {}
@@ -107,6 +109,7 @@ async def startup():
 @app.on_event("shutdown")
 async def shutdown():
     await orchestrator.close()
+    await close_royalty_ledger_client()
     logger.info("Archisynapse API Gateway stopped")
 
 
