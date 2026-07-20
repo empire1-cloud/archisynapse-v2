@@ -5,20 +5,23 @@ spec/SPEC-royalty-loop-v1.md §2 (transport/signing) and §6 (signed receipts).
 Two independent keysets:
   - Tenant keys: ed25519 public keys registered per tenant (e.g. "lyrica"),
     used to verify INCOMING event signatures. Registered via
-    POST /admin/tenants/{tenant_id}/keys — no private key material ever
-    touches the gateway for these.
+    POST /admin/tenants/{tenant_id}/keys (now admin-token-gated — see
+    royalty_admin_auth.py) and persisted in Postgres (royalty_state.py),
+    not a JSON file — no private key material ever touches the gateway
+    for these.
   - Gateway receipt key: one ed25519 keypair the gateway owns, used to
     SIGN outgoing receipts so Lyrica (and creators) can verify them
     independently. Generated on first use and persisted under
-    services/gateway/.runtime/ (gitignored — same category as
-    merchant_credentials.json; belongs in a real secrets manager
-    long-term, not a JSON file on one machine).
+    services/gateway/.runtime/ (gitignored). This one stays file-based
+    deliberately for now: it is a PRIVATE key, and moving a secret from
+    one insecure store (a file) to another (a database column) is not a
+    real fix — it needs a real secrets manager / KMS, which is flagged
+    as a known limitation, not solved by this pass.
 """
 
 import base64
 import json
 import os
-from typing import Optional
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
@@ -28,7 +31,6 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.exceptions import InvalidSignature
 
 _RUNTIME_DIR = os.path.join(os.path.dirname(__file__), ".runtime")
-TENANT_KEYS_FILE = os.path.join(_RUNTIME_DIR, "royalty_tenant_keys.json")
 RECEIPT_KEY_FILE = os.path.join(_RUNTIME_DIR, "royalty_receipt_signing_key.json")
 GATEWAY_KEY_ID = "arch-rcpt-k1"
 
@@ -43,38 +45,6 @@ def _b64(data: bytes) -> str:
 
 def _unb64(data: str) -> bytes:
     return base64.b64decode(data)
-
-
-class TenantKeyRegistry:
-    """tenant_id -> {key_id -> ed25519 public key (base64, raw 32 bytes)}."""
-
-    def __init__(self, path: str = TENANT_KEYS_FILE):
-        self._path = path
-        self._data: dict[str, dict[str, str]] = self._load()
-
-    def _load(self) -> dict[str, dict[str, str]]:
-        if os.path.exists(self._path):
-            with open(self._path) as f:
-                return json.load(f)
-        return {}
-
-    def _save(self) -> None:
-        _ensure_runtime_dir()
-        with open(self._path, "w") as f:
-            json.dump(self._data, f, indent=2)
-
-    def register(self, tenant_id: str, key_id: str, public_key_b64: str) -> None:
-        self._data.setdefault(tenant_id, {})[key_id] = public_key_b64
-        self._save()
-
-    def get(self, tenant_id: str, key_id: str) -> Optional[str]:
-        return self._data.get(tenant_id, {}).get(key_id)
-
-    def tenant_owns_key(self, tenant_id: str, key_id: str) -> bool:
-        return key_id in self._data.get(tenant_id, {})
-
-    def key_registered_to_any_tenant(self, key_id: str) -> bool:
-        return any(key_id in keys for keys in self._data.values())
 
 
 def verify_event_signature(
@@ -165,5 +135,4 @@ class GatewayReceiptSigner:
             return False
 
 
-tenant_key_registry = TenantKeyRegistry()
 gateway_receipt_signer = GatewayReceiptSigner()

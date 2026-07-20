@@ -4,3 +4,5 @@ httpx
 redis[hiredis]
 pydantic
 cryptography
+asyncpg
+argon2-cffi

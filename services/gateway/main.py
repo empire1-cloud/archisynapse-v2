@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field
 
 from canonical_event import PaymentRequest, UnifiedReceipt
 from orchestrator import orchestrator
-from royalty_routes import close_royalty_ledger_client, royalty_router
+from royalty_db import close_pool as close_royalty_pool, init_pool as init_royalty_pool
+from royalty_routes import close_royalty_transaction_client, royalty_router
 from runtime_state import (
     load_merchant_credentials,
     save_merchant_credentials,
@@ -103,13 +104,16 @@ async def startup():
         }
         save_merchant_credentials(merchant_credentials_store)
         logger.info("Loaded mer_demo credentials from environment")
+
+    await init_royalty_pool()
     logger.info("Archisynapse API Gateway starting")
 
 
 @app.on_event("shutdown")
 async def shutdown():
     await orchestrator.close()
-    await close_royalty_ledger_client()
+    await close_royalty_transaction_client()
+    await close_royalty_pool()
     logger.info("Archisynapse API Gateway stopped")
 
 

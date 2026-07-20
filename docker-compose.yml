@@ -103,10 +103,22 @@ services:
       ANALYTICS_URL: http://analytics-service:8081
       REDIS_URL: redis://redis:6379
       ARCHISYNAPSE_PEPPER: ${ARCHISYNAPSE_PEPPER:-dev-only-insecure-pepper}
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/archisynapse
+      TRANSACTION_SERVICE_URL: http://transaction-service:3000
+      FRAUD_SERVICE_URL: http://fraud-service:8000
+      # Fails closed by default -- see spec/SPEC-royalty-loop-v1.md. Must
+      # be explicitly flipped to "true" to activate the royalty loop.
+      ROYALTY_LOOP_ENABLED: ${ROYALTY_LOOP_ENABLED:-false}
+      ROYALTY_ADMIN_TOKEN: ${ROYALTY_ADMIN_TOKEN:-}
+      ROYALTY_TEST_FIXTURES_ENABLED: ${ROYALTY_TEST_FIXTURES_ENABLED:-false}
     depends_on:
+      postgres:
+        condition: service_healthy
       fraud-service:
         condition: service_started
       analytics-service:
+        condition: service_started
+      transaction-service:
         condition: service_started
       redis:
         condition: service_healthy
