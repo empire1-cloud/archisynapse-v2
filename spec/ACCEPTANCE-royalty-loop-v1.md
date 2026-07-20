@@ -83,7 +83,9 @@ Point Lyrica's Earnings screen at a fixture receipt set covering all six statuse
 ## AT-15 · Stale event replay window
 
 Re-send a correctly signed event with `occurred_at` 30 minutes old and a fresh idempotency key.
-**Expect:** 422 `stale_event`, no financial objects. (Guards captured-and-replayed requests that pass signature checks.)
+**Expect:** 422 `stale_event`. Zero rows in `royalty_obligations`/`royalty_idempotency`/ledger — the replay-window check happens before any financial side effect, not after. An auditable rejection record is written. (Guards captured-and-replayed requests that pass signature checks.)
+
+Also test the boundary values, not just an obviously-stale timestamp, so the assertion isn't riding on wall-clock timing: `occurred_at` at exactly `now - 5:00` (accept — inclusive boundary) and `now - 5:01` (reject, `stale_event`) using an injectable clock rather than a real `sleep`.
 
 ---
 
