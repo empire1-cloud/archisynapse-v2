@@ -29,6 +29,9 @@ services/fraud/proofs/
 services/fraud/protected/
 services/fraud/uploads/
 
+# Archived scratch runtime state (may contain private keys) -- never committed
+services/gateway/archive/
+
 # Env files
 .env
 .env.*
