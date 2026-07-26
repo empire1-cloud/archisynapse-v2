@@ -1,23 +1,44 @@
-name: Gateway proof checks
+name: Payment proof checks
 
 on:
   pull_request:
     paths:
       - "services/gateway/**"
+      - "services/transaction/**"
       - "migrations/**"
       - "docker-compose.yml"
+      - ".env.example"
       - ".github/workflows/gateway-proof.yml"
   push:
     branches:
       - main
     paths:
       - "services/gateway/**"
+      - "services/transaction/**"
       - "migrations/**"
       - "docker-compose.yml"
+      - ".env.example"
 
 jobs:
   gateway-python:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: archisynapse
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d archisynapse"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/archisynapse
+      PGPASSWORD: postgres
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -30,10 +51,47 @@ jobs:
       - name: Install gateway dependencies
         run: python -m pip install -r services/gateway/requirements.txt
 
+      - name: Apply PostgreSQL migrations
+        run: |
+          for migration in migrations/*.sql; do
+            echo "Applying ${migration}"
+            psql -h 127.0.0.1 -U postgres -d archisynapse -v ON_ERROR_STOP=1 -f "${migration}"
+          done
+
       - name: Compile gateway files
         working-directory: services/gateway
-        run: python -m py_compile gateway_store.py production_main.py
+        run: >-
+          python -m py_compile
+          gateway_store.py
+          production_main.py
+          receipt_proof.py
 
-      - name: Run gateway utility tests
+      - name: Run gateway utility and proof tests
         working-directory: services/gateway
-        run: python -m unittest discover -s tests -p "test_gateway_store.py" -v
+        run: |
+          python -m unittest discover -s tests -p "test_gateway_store.py" -v
+          python -m unittest discover -s tests -p "test_receipt_proof.py" -v
+          python -m unittest discover -s tests -p "test_gateway_postgres_concurrency.py" -v
+
+  transaction-node:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install workspace dependencies
+        run: npm ci
+
+      - name: Build transaction service
+        run: npm run build --workspace=services/transaction
+
+      - name: Run processor proof tests
+        run: >-
+          npm run test --workspace=services/transaction --
+          --run transaction-service-processor.test.ts
