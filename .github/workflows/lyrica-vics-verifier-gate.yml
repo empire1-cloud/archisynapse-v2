@@ -1,0 +1,51 @@
+name: Lyrica VICS Verifier Gate
+
+on:
+  push:
+    branches:
+      - codex/lyrica-vics-verifier
+  pull_request:
+    paths:
+      - "services/gateway/royalty_decision.py"
+      - "services/gateway/test_lyrica_vics_verifier.py"
+      - "docs/LYRICA_VICS_VERIFIER_DEPLOYMENT.md"
+      - ".github/workflows/lyrica-vics-verifier-gate.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  focused-verifier-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: services/gateway
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            services/gateway
+          sparse-checkout-cone-mode: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install focused dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install \
+            "httpx>=0.27,<1" \
+            "pytest>=8,<9"
+
+      - name: Compile verifier
+        run: python -m py_compile royalty_decision.py
+
+      - name: Run verifier suite
+        env:
+          PYTHONPATH: .
+        run: pytest -q test_lyrica_vics_verifier.py
