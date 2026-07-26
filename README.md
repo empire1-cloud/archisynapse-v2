@@ -1,97 +1,128 @@
-# Archisynapse - Intelligent Payment Infrastructure
+# Archisynapse
 
-> The payment platform that understands your business.
+Archisynapse is a payment and accounting system being built under Empire-1.
 
-## What Is This?
+It is designed to receive a payment request, check risk, record the payment, post balanced ledger entries, update revenue records, and return a receipt that shows what happened.
 
-Archisynapse is a next-generation payment infrastructure platform that delivers:
-- **10x faster settlement** (sub-second vs 1-3 days)
-- **50% lower fees** (0.5-1.5% vs 2.9%+$0.30)
-- **AI-powered optimization** (real-time pricing, fraud detection, churn prediction)
+Archisynapse is its own business and system. Lyrica 3, Southern Arcade, other Empire-1 products, and outside companies may use it as customers.
 
-## Architecture
+## What exists in this repository
 
+The repository contains separate services for:
+
+- payment and refund handling
+- double-entry ledger posting
+- fraud and risk checks
+- revenue analytics
+- an API gateway
+- PostgreSQL storage
+- Redis support
+- signed royalty-event processing
+- idempotency and recovery paths
+
+The intended payment flow is:
+
+```text
+Merchant request
+  -> API gateway
+  -> risk check
+  -> transaction service
+  -> ledger posting
+  -> analytics update
+  -> receipt
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    API Gateway (Express)                     │
-├─────────────────────────────────────────────────────────────┤
-│  Transaction  │   Ledger   │   Fraud    │  Analytics  │ AI  │
-│    Service    │   Service  │  Detection │   Service   │Engine│
-├─────────────────────────────────────────────────────────────┤
-│                    PostgreSQL + Redis                        │
-└─────────────────────────────────────────────────────────────┘
-```
 
-## Services
+The transaction service is the only service allowed to create financial ledger postings. The gateway coordinates the flow but does not write directly to the ledger.
 
-| Service | Status | Purpose |
-|---------|--------|---------|
-| Transaction | ✅ Built | Payment processing, refunds |
-| Ledger | ✅ Built | Double-entry bookkeeping |
-| Fraud | 🔜 Next | ML-powered fraud detection |
-| Analytics | 🔜 Next | Revenue intelligence |
-| Compliance | 🔜 Next | Auto-reporting (PCI, SOC 2) |
+## Current status
 
-## Quick Start
+| Area | Current status | What still needs proof or work |
+|---|---|---|
+| Payment records | Implemented | Connect and verify a real external payment processor |
+| Refund records | Implemented | Add processor-specific refund adapters and production tests |
+| Double-entry ledger | Implemented | Continue reconciliation and failure testing |
+| Fraud service | Implemented as a risk service | Do not claim a detection rate until measured with a documented dataset |
+| Analytics service | Implemented | Validate reports against production-like transaction data |
+| API gateway | Implemented | Finish merchant authentication and remove local JSON state |
+| Royalty event path | Implemented behind a disabled-by-default flag | Complete deployment verification with approved tenant keys |
+| Merchant authentication | In progress | Store hashed merchant keys and bind each request to one merchant |
+| Durable receipts | Partly implemented | Move all remaining payment receipts and idempotency state to PostgreSQL |
+| External settlement | Not proven | Add an approved processor or banking partner adapter |
+| Compliance certification | Not claimed | Complete the required audits before using certification language |
+| Performance and uptime | Not claimed | Run repeatable load and reliability tests and publish the evidence |
+| Customer and revenue traction | Not claimed in this repository | Use only founder-approved, documented records |
+
+## What this repository does not claim
+
+This project does not currently claim:
+
+- a specific settlement speed
+- lower fees than another company
+- a transaction-per-second capacity
+- a fraud detection percentage
+- PCI-DSS, SOC 2, ISO 27001, or other certification
+- a specific number of customers, pilots, developers, or revenue
+- production readiness
+
+Those statements may be used only after there is current evidence that can be reviewed.
+
+## Run the development stack
+
+Requirements:
+
+- Docker with Compose support
+- available local ports used by `docker-compose.yml`
+
+Start the stack:
 
 ```bash
-# Start PostgreSQL
-docker start postgres
-
-# Install dependencies
-cd services/transaction && npm install
-cd services/ledger && npm install
-
-# Run services
-npm run dev  # Transaction on :3000
-npm run dev  # Ledger on :3001
+docker compose up --build
 ```
 
-## Revenue Model
+Main local services:
 
-| Tier | Price | Transaction Fee |
-|------|-------|-----------------|
-| Builders | Free | Up to 100K/mo |
-| Growth | $99/mo | 0.5% |
-| Scale | $299/mo | 0.3% |
-| Enterprise | Custom | AI consultation |
+```text
+Gateway:      http://127.0.0.1:9000
+Transaction:  http://127.0.0.1:3000
+Ledger:       http://127.0.0.1:3001
+Fraud:        http://127.0.0.1:8000
+Analytics:    http://127.0.0.1:8081
+PostgreSQL:   127.0.0.1:5432
+Redis:        127.0.0.1:6379
+```
 
-## AI Blueprint Intelligence (Moat)
-
-The platform analyzes payment architectures and recommends:
-- Optimal pricing models
-- Cost reduction opportunities  
-- Compliance gaps
-- Scaling bottlenecks
-
-Saves 100+ hours of planning. Creates high switching costs.
-
-## Research & Intelligence
+Check the gateway and its dependencies:
 
 ```bash
-# Use AI-Q for market research
-cd ~/projects/aiq && source .venv/bin/activate
-aiq-research --query "PCI DSS Level 1 certification requirements 2026"
-
-# Use Harness 100 for building
-cp -r ~/harness-100/en/53-financial-modeler/.claude/ .claude/
+curl http://127.0.0.1:9000/health
 ```
 
-## Roadmap
+## Safety rules
 
-| Phase | Timeline | Focus |
-|-------|----------|-------|
-| Foundation | Weeks 1-4 | API hardening, compliance |
-| Intelligence | Weeks 5-8 | AI Blueprint, fraud detection |
-| Ecosystem | Weeks 9-12 | Marketplace, developer program |
-| Scale | Months 4-6 | Enterprise, white-label |
+- Never store raw card details in this system.
+- Never place secrets in payment events, receipts, logs, or source control.
+- Every money amount must use fixed precision or minor units.
+- Every financial transaction must balance.
+- Repeated requests with the same idempotency key must not create duplicate money movement.
+- A failed fraud check must fail closed.
+- The gateway must not post directly to the ledger.
+- A receipt must report partial or failed work honestly.
+- A product claim must link to current test, audit, benchmark, receipt, or customer evidence.
 
-## Links
+## Immediate build priorities
 
-- [Architecture](docs/architecture/)
-- [API Reference](docs/api/)
-- [Compliance](docs/compliance/)
+1. Replace local merchant credentials and payment receipt files with PostgreSQL records.
+2. Add hashed merchant API keys with one-time key reveal.
+3. Bind every payment request to its authenticated merchant.
+4. Add durable idempotency with request-hash conflict detection.
+5. Add a processor adapter boundary without pretending a live banking rail is connected.
+6. Add repeatable end-to-end tests that produce receipts and balanced-ledger evidence.
+7. Publish measured results only after the tests are run.
 
----
+## Product boundary
 
-Built with: AI-Q Research | Harness 100 | Agent Skills
+Archisynapse provides payment orchestration, accounting, fraud checks, reconciliation, revenue records, and receipts.
+
+It does not own Lyrica 3, its creator graph, or any other Empire-1 product. Each Empire-1 universe operates and earns independently.
+
+**Build first. Measure second. Claim only what the evidence proves.**
