@@ -17,6 +17,7 @@ from canonical_event import PaymentRequest, UnifiedReceipt
 from orchestrator import orchestrator
 from royalty_db import close_pool as close_royalty_pool, init_pool as init_royalty_pool
 from royalty_routes import close_royalty_transaction_client, royalty_router
+from stripe_routes import router as stripe_router
 from runtime_state import (
     load_merchant_credentials,
     save_merchant_credentials,
@@ -37,6 +38,7 @@ app = FastAPI(
     version="1.0.0",
 )
 app.include_router(royalty_router)
+app.include_router(stripe_router)
 
 receipt_store: Dict[str, UnifiedReceipt] = {}
 correlation_store: Dict[str, str] = {}
