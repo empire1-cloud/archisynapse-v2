@@ -6,3 +6,4 @@ pydantic
 cryptography
 asyncpg
 argon2-cffi
+stripe
