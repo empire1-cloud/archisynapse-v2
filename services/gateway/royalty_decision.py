@@ -5,12 +5,12 @@ spec/ACCEPTANCE-royalty-loop-v1.md AT-07/AT-08/AT-10, and the
 architecture review that flagged this exact gap.
 
 Two independent checks, both real:
-  - Ownership: does the track's VICS proof actually verify? No real
-    VICS service exists yet, so the default OwnershipVerifier fails
-    CLOSED (every event is unverified until a real backend is wired
-    in) — it never treats "the fields are present" as "the proof is
-    valid". A failed ownership check is a hard 422 (request-level
-    rejection), separate from the fraud-service's business decision.
+  - Ownership: does the track's VICS proof actually verify? Production
+    can use LyricaVicsOwnershipVerifier, which calls a configured Lyrica
+    service-to-service proof endpoint and requires every returned proof
+    binding to match the event. Missing configuration, network errors,
+    malformed responses, revoked/expired proofs, or mismatches all fail
+    CLOSED. Test fixtures remain explicitly opt-in and isolated.
   - Risk: calls the REAL fraud-service's purpose-built
     POST /risk/royalty endpoint (archisynapse_fraud_mvp.py) — not the
     generic /risk/checkout used by the card-payment loop. That model
@@ -28,20 +28,31 @@ pretends to solve.
 
 Test-only fixtures (a deterministic revoked-proof id, a deterministic
 high-risk actor id) exist ONLY to make AT-07/AT-08/AT-10 exercisable
-without a real VICS backend or fabricated account history, live behind
-the same interfaces as production, and activate ONLY when
-ROYALTY_TEST_FIXTURES_ENABLED=true is set on purpose — never on by
-default, never silently.
+without fabricated production state, live behind the same interfaces
+as production, and activate ONLY when ROYALTY_TEST_FIXTURES_ENABLED=true
+is set on purpose — never on by default, never silently.
 """
 
+import logging
 import os
 from dataclasses import dataclass
-from typing import Protocol
+from datetime import datetime, timezone
+from typing import Optional, Protocol
 
 import httpx
 
 FRAUD_SERVICE_URL = os.getenv("FRAUD_SERVICE_URL", "http://127.0.0.1:8080")
 ROYALTY_TEST_FIXTURES_ENABLED = os.getenv("ROYALTY_TEST_FIXTURES_ENABLED", "false").lower() == "true"
+LYRICA_VICS_VERIFIER_ENABLED = os.getenv("LYRICA_VICS_VERIFIER_ENABLED", "false").lower() == "true"
+LYRICA_VICS_VERIFY_URL = os.getenv("LYRICA_VICS_VERIFY_URL", "").strip()
+LYRICA_VICS_SERVICE_TOKEN = os.getenv("LYRICA_VICS_SERVICE_TOKEN", "").strip()
+
+try:
+    LYRICA_VICS_VERIFY_TIMEOUT_SECONDS = float(os.getenv("LYRICA_VICS_VERIFY_TIMEOUT_SECONDS", "5"))
+except ValueError:
+    LYRICA_VICS_VERIFY_TIMEOUT_SECONDS = 5.0
+
+logger = logging.getLogger("archisynapse.royalty_decision")
 
 _DECISION_MAP = {
     "release_payout": "allow",
@@ -66,15 +77,131 @@ class Decision:
 
 
 class OwnershipVerifier(Protocol):
-    async def verify(self, track_id: str, dna_tag: str, soulprint_hash: str, vics_proof_id: str) -> bool:
+    async def verify(
+        self,
+        track_id: str,
+        dna_tag: str,
+        soulprint_hash: str,
+        vics_proof_id: str,
+        creator_id: str,
+    ) -> bool:
         ...
 
 
 class FailClosedOwnershipVerifier:
-    """Production default. No real VICS backend exists yet -> always unverified."""
+    """Production-safe fallback: unavailable ownership proof is never valid."""
 
-    async def verify(self, track_id: str, dna_tag: str, soulprint_hash: str, vics_proof_id: str) -> bool:
+    async def verify(
+        self,
+        track_id: str,
+        dna_tag: str,
+        soulprint_hash: str,
+        vics_proof_id: str,
+        creator_id: str,
+    ) -> bool:
         return False
+
+
+class LyricaVicsOwnershipVerifier:
+    """Verify a Lyrica proof through an authenticated service endpoint.
+
+    Expected response contract::
+
+        {
+          "verified": true,
+          "revoked": false,
+          "track_id": "trk_...",
+          "dna_tag": "dna_...",
+          "soulprint_hash": "sp_sha256_...",
+          "vics_proof_id": "vics_...",
+          "creator_id": "cre_...",
+          "expires_at": "2026-12-31T23:59:59Z"  // optional
+        }
+
+    The response must bind every identity/proof field to the incoming event.
+    A truthy status without exact binding is rejected.
+    """
+
+    def __init__(
+        self,
+        verify_url: str,
+        service_token: str,
+        timeout_seconds: float = 5.0,
+        transport: Optional[httpx.AsyncBaseTransport] = None,
+    ):
+        self.verify_url = verify_url.strip()
+        self.service_token = service_token.strip()
+        self.timeout_seconds = timeout_seconds
+        self.transport = transport
+
+    @staticmethod
+    def _not_expired(expires_at: object) -> bool:
+        if expires_at in (None, ""):
+            return True
+        if not isinstance(expires_at, str):
+            return False
+        try:
+            expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
+        return expiry > datetime.now(timezone.utc)
+
+    async def verify(
+        self,
+        track_id: str,
+        dna_tag: str,
+        soulprint_hash: str,
+        vics_proof_id: str,
+        creator_id: str,
+    ) -> bool:
+        if not self.verify_url or not self.service_token:
+            return False
+
+        request_body = {
+            "track_id": track_id,
+            "dna_tag": dna_tag,
+            "soulprint_hash": soulprint_hash,
+            "vics_proof_id": vics_proof_id,
+            "creator_id": creator_id,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.service_token}",
+            "X-Empire1-Service": "archisynapse-v2",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds,
+                transport=self.transport,
+            ) as client:
+                response = await client.post(self.verify_url, json=request_body, headers=headers)
+            if response.status_code != 200:
+                return False
+            payload = response.json()
+        except (httpx.HTTPError, ValueError, TypeError):
+            return False
+
+        if not isinstance(payload, dict):
+            return False
+        if payload.get("verified") is not True or payload.get("revoked") is True:
+            return False
+
+        expected_bindings = {
+            "track_id": track_id,
+            "dna_tag": dna_tag,
+            "soulprint_hash": soulprint_hash,
+            "vics_proof_id": vics_proof_id,
+            "creator_id": creator_id,
+        }
+        if any(payload.get(field) != expected for field, expected in expected_bindings.items()):
+            return False
+        if not self._not_expired(payload.get("expires_at")):
+            return False
+
+        return True
 
 
 class TestFixtureOwnershipVerifier:
@@ -82,7 +209,14 @@ class TestFixtureOwnershipVerifier:
 
     REVOKED_PROOF_IDS = {"vics_revoked_test_fixture"}
 
-    async def verify(self, track_id: str, dna_tag: str, soulprint_hash: str, vics_proof_id: str) -> bool:
+    async def verify(
+        self,
+        track_id: str,
+        dna_tag: str,
+        soulprint_hash: str,
+        vics_proof_id: str,
+        creator_id: str,
+    ) -> bool:
         return vics_proof_id not in self.REVOKED_PROOF_IDS
 
 
@@ -95,6 +229,17 @@ class _RiskFixture:
 def _select_ownership_verifier() -> OwnershipVerifier:
     if ROYALTY_TEST_FIXTURES_ENABLED:
         return TestFixtureOwnershipVerifier()
+    if LYRICA_VICS_VERIFIER_ENABLED:
+        if not LYRICA_VICS_VERIFY_URL or not LYRICA_VICS_SERVICE_TOKEN:
+            logger.error(
+                "LYRICA_VICS_VERIFIER_ENABLED=true but URL/token configuration is incomplete; failing closed"
+            )
+            return FailClosedOwnershipVerifier()
+        return LyricaVicsOwnershipVerifier(
+            verify_url=LYRICA_VICS_VERIFY_URL,
+            service_token=LYRICA_VICS_SERVICE_TOKEN,
+            timeout_seconds=LYRICA_VICS_VERIFY_TIMEOUT_SECONDS,
+        )
     return FailClosedOwnershipVerifier()
 
 
@@ -133,7 +278,13 @@ async def evaluate_decision(
     trigger_actor_id: str,
     amount: str,
 ) -> Decision:
-    ownership_ok = await ownership_verifier.verify(track_id, dna_tag, soulprint_hash, vics_proof_id)
+    ownership_ok = await ownership_verifier.verify(
+        track_id,
+        dna_tag,
+        soulprint_hash,
+        vics_proof_id,
+        creator_id,
+    )
     if not ownership_ok:
         return Decision(outcome="block", policy="ownership_invalid", risk_score=1.0, reasons=["vics_invalid"])
 
