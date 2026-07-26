@@ -1,9 +1,9 @@
 """Production-facing Archisynapse gateway.
 
-This entrypoint keeps merchant identity, idempotency, and receipts in PostgreSQL.
-It does not claim or simulate connection to a card network or banking rail.
+Merchant identity, idempotency, and receipts are kept in PostgreSQL. Payment
+receipts can be signed with Ed25519. The gateway does not claim production
+settlement or direct card-network connectivity.
 """
-
 from __future__ import annotations
 
 import os
@@ -30,9 +30,14 @@ from gateway_store import (
     generate_merchant_id,
 )
 from orchestrator import orchestrator
+from receipt_proof import (
+    ReceiptProofConfigurationError,
+    ReceiptSigner,
+    build_receipt_signer_from_env,
+    verify_receipt,
+)
 from royalty_db import close_pool, get_pool, init_pool
 from royalty_routes import close_royalty_transaction_client, royalty_router
-
 
 FRAUD_SERVICE_URL = os.getenv("FRAUD_SERVICE_URL", "http://127.0.0.1:8000")
 TRANSACTION_SERVICE_URL = os.getenv(
@@ -45,12 +50,13 @@ ANALYTICS_SERVICE_URL = os.getenv(
 
 app = FastAPI(
     title="Archisynapse",
-    description="Payment orchestration, ledger evidence, and receipts.",
-    version="0.2.0",
+    description="Payment orchestration, ledger evidence, and signed receipts.",
+    version="0.3.0",
 )
 app.include_router(royalty_router)
 
 _store: GatewayStore | None = None
+_receipt_signer: ReceiptSigner | None = None
 
 
 class MerchantCreateRequest(BaseModel):
@@ -70,7 +76,9 @@ class MerchantCreateResponse(BaseModel):
 class PaymentCreateRequest(BaseModel):
     customer_id: str = Field(min_length=1, max_length=255)
     amount: Decimal = Field(gt=0, max_digits=19, decimal_places=4)
-    fee_amount: Decimal = Field(default=Decimal("0"), ge=0, max_digits=19, decimal_places=4)
+    fee_amount: Decimal = Field(
+        default=Decimal("0"), ge=0, max_digits=19, decimal_places=4
+    )
     currency: str = Field(default="USD", min_length=3, max_length=3)
     payment_method_type: Literal["CARD", "BANK_TRANSFER", "WALLET"] = "CARD"
     payment_method_token: str = Field(min_length=1, max_length=255)
@@ -111,6 +119,7 @@ class HealthResponse(BaseModel):
     service: str
     database: str
     merchant_key_encryption: str
+    receipt_signing: str
     dependencies: dict[str, str]
     timestamp: str
 
@@ -125,9 +134,13 @@ def _build_cipher() -> CredentialCipher | None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    global _store
+    global _store, _receipt_signer
     pool = await init_pool()
     _store = GatewayStore(pool, _build_cipher())
+    try:
+        _receipt_signer = build_receipt_signer_from_env()
+    except ReceiptProofConfigurationError as exc:
+        raise RuntimeError(f"receipt signing configuration is invalid: {exc}") from exc
 
 
 @app.on_event("shutdown")
@@ -193,10 +206,7 @@ async def _create_internal_service_credentials(
     if fraud_response.status_code != 200:
         raise HTTPException(
             status_code=502,
-            detail={
-                "error": "fraud merchant setup failed",
-                "status": fraud_response.status_code,
-            },
+            detail={"error": "fraud merchant setup failed", "status": fraud_response.status_code},
         )
     if analytics_response.status_code != 200:
         raise HTTPException(
@@ -234,14 +244,16 @@ async def health() -> HealthResponse:
     except Exception:
         database = "unavailable"
 
-    checks = [
-        await _dependency_health("fraud", FRAUD_SERVICE_URL),
-        await _dependency_health("transaction", TRANSACTION_SERVICE_URL),
-        await _dependency_health("ledger", LEDGER_SERVICE_URL),
-        await _dependency_health("analytics", ANALYTICS_SERVICE_URL),
-    ]
-    dependencies = dict(checks)
+    dependencies = dict(
+        [
+            await _dependency_health("fraud", FRAUD_SERVICE_URL),
+            await _dependency_health("transaction", TRANSACTION_SERVICE_URL),
+            await _dependency_health("ledger", LEDGER_SERVICE_URL),
+            await _dependency_health("analytics", ANALYTICS_SERVICE_URL),
+        ]
+    )
     encryption = "configured" if _store and _store.cipher else "not_configured"
+    signing = "configured" if _receipt_signer else "not_configured"
     overall = (
         "healthy"
         if database == "healthy" and all(value == "healthy" for value in dependencies.values())
@@ -252,6 +264,7 @@ async def health() -> HealthResponse:
         service="archisynapse-gateway",
         database=database,
         merchant_key_encryption=encryption,
+        receipt_signing=signing,
         dependencies=dependencies,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
@@ -259,10 +272,20 @@ async def health() -> HealthResponse:
 
 @app.get("/status")
 async def system_status() -> dict[str, Any]:
+    processor = os.getenv("ARCHISYNAPSE_PROCESSOR", "disabled").strip().lower()
     return {
         "service": "archisynapse-gateway",
-        "version": "0.2.0",
-        "payment_processor_connected": False,
+        "version": "0.3.0",
+        "processor": {
+            "adapter": processor,
+            "test_mode": processor == "stripe_test",
+            "live_money": False,
+        },
+        "receipt_signing": {
+            "configured": _receipt_signer is not None,
+            "algorithm": "Ed25519" if _receipt_signer else None,
+            "key_id": _receipt_signer.key_id if _receipt_signer else None,
+        },
         "production_ready": False,
         "claims": {
             "settlement_speed": "not measured",
@@ -314,6 +337,17 @@ async def merchant_me(
         "name": merchant.name,
         "plan": merchant.plan,
         "key_id": merchant.key_id,
+    }
+
+
+@app.get("/v1/proof/key")
+async def receipt_proof_key() -> dict[str, Any]:
+    if _receipt_signer is None:
+        raise HTTPException(status_code=404, detail="receipt signing is not configured")
+    return {
+        "algorithm": _receipt_signer.algorithm,
+        "key_id": _receipt_signer.key_id,
+        "public_key_b64": _receipt_signer.public_key_b64(),
     }
 
 
@@ -374,11 +408,12 @@ async def process_payment(
             payment_request, idempotency_key=idempotency_key
         )
         payload = receipt.model_dump(mode="json")
+        stored_payload = _receipt_signer.attach(payload) if _receipt_signer else payload
         await store.save_receipt(
             merchant_id=merchant.merchant_id,
             idempotency_key=idempotency_key,
             request_hash=request_hash,
-            receipt=payload,
+            receipt=stored_payload,
         )
         await store.complete_idempotency(
             merchant_id=merchant.merchant_id,
@@ -422,6 +457,42 @@ async def get_receipt(
     if receipt is None:
         raise HTTPException(status_code=404, detail="receipt not found")
     return UnifiedReceipt(**receipt)
+
+
+@app.get("/v1/receipts/{event_id}/evidence")
+async def get_receipt_evidence(
+    event_id: str,
+    merchant: MerchantPrincipal = Depends(require_merchant),
+    store: GatewayStore = Depends(get_store),
+) -> dict[str, Any]:
+    receipt = await store.get_receipt(
+        merchant_id=merchant.merchant_id, event_id=event_id
+    )
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="receipt not found")
+    valid, message = verify_receipt(receipt)
+    return {"receipt": receipt, "signature_valid": valid, "verification": message}
+
+
+@app.get("/v1/receipts/{event_id}/verify")
+async def verify_stored_receipt(
+    event_id: str,
+    merchant: MerchantPrincipal = Depends(require_merchant),
+    store: GatewayStore = Depends(get_store),
+) -> dict[str, Any]:
+    receipt = await store.get_receipt(
+        merchant_id=merchant.merchant_id, event_id=event_id
+    )
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="receipt not found")
+    valid, message = verify_receipt(receipt)
+    proof = receipt.get("_proof") if isinstance(receipt, dict) else None
+    return {
+        "event_id": event_id,
+        "valid": valid,
+        "message": message,
+        "proof": proof,
+    }
 
 
 @app.post("/v1/payments/{payment_id}/refund")
