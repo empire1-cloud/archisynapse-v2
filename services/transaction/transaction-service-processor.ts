@@ -1,4 +1,4 @@
-export type ProcessorMode = 'disabled' | 'test';
+export type ProcessorMode = 'disabled' | 'test' | 'live_smoke';
 export type ProcessorStatus = 'succeeded' | 'processing' | 'requires_action' | 'failed';
 
 export interface ProcessorChargeRequest {
@@ -109,24 +109,24 @@ export class DisabledProcessor implements PaymentProcessor {
   }
 }
 
-export interface StripeTestProcessorOptions {
+interface StripeProcessorOptions {
   secretKey: string;
   baseUrl?: string;
   fetchImpl?: ProcessorFetch;
 }
 
-export class StripeTestProcessor implements PaymentProcessor {
+abstract class StripeProcessorBase implements PaymentProcessor {
   readonly name = 'stripe';
-  readonly mode: ProcessorMode = 'test';
+  abstract readonly mode: ProcessorMode;
 
   private readonly secretKey: string;
   private readonly baseUrl: string;
   private readonly fetchImpl: ProcessorFetch;
 
-  constructor(options: StripeTestProcessorOptions) {
-    if (!options.secretKey.startsWith('sk_test_')) {
+  protected constructor(options: StripeProcessorOptions, expectedPrefix: 'sk_test_' | 'sk_live_') {
+    if (!options.secretKey.startsWith(expectedPrefix)) {
       throw new ProcessorConfigurationError(
-        'Stripe proof adapter accepts test-mode keys only (sk_test_)'
+        `Stripe ${expectedPrefix === 'sk_test_' ? 'test' : 'live smoke'} adapter requires ${expectedPrefix} keys`
       );
     }
     this.secretKey = options.secretKey;
@@ -143,11 +143,15 @@ export class StripeTestProcessor implements PaymentProcessor {
     return { provider: this.name, mode: this.mode, configured: true };
   }
 
+  protected validateCharge(_request: ProcessorChargeRequest): void {}
+  protected validateRefund(_request: ProcessorRefundRequest): void {}
+
   async charge(request: ProcessorChargeRequest): Promise<ProcessorChargeResult> {
     validateMinorAmount(request.amountMinor);
     validateCurrency(request.currency);
     validateToken(request.paymentMethodToken);
     validateIdempotencyKey(request.idempotencyKey);
+    this.validateCharge(request);
 
     const body = new URLSearchParams();
     body.set('amount', String(request.amountMinor));
@@ -188,6 +192,7 @@ export class StripeTestProcessor implements PaymentProcessor {
   async refund(request: ProcessorRefundRequest): Promise<ProcessorRefundResult> {
     validateMinorAmount(request.amountMinor);
     validateIdempotencyKey(request.idempotencyKey);
+    this.validateRefund(request);
     if (!request.processorTransactionId.startsWith('pi_')) {
       throw new ProcessorProtocolError('Stripe refund requires a PaymentIntent id (pi_)');
     }
@@ -261,22 +266,94 @@ export class StripeTestProcessor implements PaymentProcessor {
   }
 }
 
+export interface StripeTestProcessorOptions extends StripeProcessorOptions {}
+
+export class StripeTestProcessor extends StripeProcessorBase {
+  readonly mode: ProcessorMode = 'test';
+
+  constructor(options: StripeTestProcessorOptions) {
+    super(options, 'sk_test_');
+  }
+}
+
+export interface StripeLiveSmokeProcessorOptions extends StripeProcessorOptions {}
+
+export class StripeLiveSmokeProcessor extends StripeProcessorBase {
+  readonly mode: ProcessorMode = 'live_smoke';
+
+  constructor(options: StripeLiveSmokeProcessorOptions) {
+    super(options, 'sk_live_');
+  }
+
+  protected validateCharge(request: ProcessorChargeRequest): void {
+    if (request.amountMinor !== 100 || request.currency.toUpperCase() !== 'USD') {
+      throw new ProcessorProtocolError(
+        'live smoke mode permits exactly 100 cents USD and no other amount or currency'
+      );
+    }
+    if (!request.idempotencyKey.startsWith('live-smoke-')) {
+      throw new ProcessorProtocolError(
+        'live smoke mode requires an Idempotency-Key beginning with live-smoke-'
+      );
+    }
+    if (request.metadata?.live_smoke_test !== true) {
+      throw new ProcessorProtocolError(
+        'live smoke mode requires metadata.live_smoke_test=true'
+      );
+    }
+  }
+
+  protected validateRefund(request: ProcessorRefundRequest): void {
+    if (request.amountMinor !== 100) {
+      throw new ProcessorProtocolError('live smoke refunds must be exactly 100 cents');
+    }
+    if (!request.idempotencyKey.startsWith('live-smoke-refund-')) {
+      throw new ProcessorProtocolError(
+        'live smoke refund idempotency keys must begin with live-smoke-refund-'
+      );
+    }
+  }
+}
+
 export function buildProcessorFromEnv(
   env: Record<string, string | undefined> = process.env
 ): PaymentProcessor {
   const provider = (env.ARCHISYNAPSE_PROCESSOR || 'disabled').trim().toLowerCase();
   if (provider === 'disabled' || provider === '') return new DisabledProcessor();
-  if (provider !== 'stripe_test') {
-    throw new ProcessorConfigurationError(`unsupported processor adapter: ${provider}`);
-  }
+
   const secretKey = (env.STRIPE_SECRET_KEY || '').trim();
   if (!secretKey) {
-    throw new ProcessorConfigurationError('STRIPE_SECRET_KEY is required for stripe_test');
+    throw new ProcessorConfigurationError('STRIPE_SECRET_KEY is required');
   }
-  return new StripeTestProcessor({
-    secretKey,
-    baseUrl: env.STRIPE_API_BASE_URL || undefined,
-  });
+
+  if (provider === 'stripe_test') {
+    return new StripeTestProcessor({
+      secretKey,
+      baseUrl: env.STRIPE_API_BASE_URL || undefined,
+    });
+  }
+
+  if (provider === 'stripe_live_smoke') {
+    if ((env.ARCHISYNAPSE_LIVE_SMOKE_TEST_ENABLED || '').trim().toLowerCase() !== 'true') {
+      throw new ProcessorConfigurationError(
+        'stripe_live_smoke requires ARCHISYNAPSE_LIVE_SMOKE_TEST_ENABLED=true'
+      );
+    }
+    if (
+      (env.ARCHISYNAPSE_LIVE_SMOKE_TEST_CONFIRM || '').trim() !==
+      'CHARGE_AND_REFUND_ONE_USD'
+    ) {
+      throw new ProcessorConfigurationError(
+        'stripe_live_smoke requires the exact live smoke confirmation phrase'
+      );
+    }
+    return new StripeLiveSmokeProcessor({
+      secretKey,
+      baseUrl: env.STRIPE_API_BASE_URL || undefined,
+    });
+  }
+
+  throw new ProcessorConfigurationError(`unsupported processor adapter: ${provider}`);
 }
 
 export function decimalStringToMinorUnits(amount: string, currency: string): number {
@@ -309,7 +386,7 @@ function validateCurrency(value: string): void {
 function validateToken(value: string): void {
   if (!/^pm_[A-Za-z0-9_]+$/.test(value)) {
     throw new ProcessorProtocolError(
-      'processor proof lane accepts tokenized PaymentMethod ids only (pm_); raw card data is forbidden'
+      'processor lanes accept tokenized PaymentMethod ids only (pm_); raw card data is forbidden'
     );
   }
 }
