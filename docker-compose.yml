@@ -99,15 +99,17 @@ services:
     ports:
       - "9000:9000"
     environment:
-      FRAUD_URL: http://fraud-service:8000
-      ANALYTICS_URL: http://analytics-service:8081
       REDIS_URL: redis://redis:6379
-      ARCHISYNAPSE_PEPPER: ${ARCHISYNAPSE_PEPPER:-dev-only-insecure-pepper}
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/archisynapse
       TRANSACTION_SERVICE_URL: http://transaction-service:3000
+      LEDGER_SERVICE_URL: http://ledger-service:3001
       FRAUD_SERVICE_URL: http://fraud-service:8000
-      # Fails closed by default -- see spec/SPEC-royalty-loop-v1.md. Must
-      # be explicitly flipped to "true" to activate the royalty loop.
+      ANALYTICS_SERVICE_URL: http://analytics-service:8081
+      ARCHISYNAPSE_ADMIN_TOKEN: ${ARCHISYNAPSE_ADMIN_TOKEN:-}
+      ARCHISYNAPSE_GATEWAY_MASTER_KEY: ${ARCHISYNAPSE_GATEWAY_MASTER_KEY:-}
+      ARCHISYNAPSE_GATEWAY_KEY_ID: ${ARCHISYNAPSE_GATEWAY_KEY_ID:-gateway-v1}
+      # Fails closed by default. It must be explicitly enabled after its
+      # signing keys and tenant configuration are verified.
       ROYALTY_LOOP_ENABLED: ${ROYALTY_LOOP_ENABLED:-false}
       ROYALTY_ADMIN_TOKEN: ${ROYALTY_ADMIN_TOKEN:-}
       ROYALTY_TEST_FIXTURES_ENABLED: ${ROYALTY_TEST_FIXTURES_ENABLED:-false}
@@ -119,6 +121,8 @@ services:
       analytics-service:
         condition: service_started
       transaction-service:
+        condition: service_started
+      ledger-service:
         condition: service_started
       redis:
         condition: service_healthy
