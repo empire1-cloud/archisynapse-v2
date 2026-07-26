@@ -2,7 +2,7 @@
 
 Archisynapse is a payment and accounting system being built under Empire-1.
 
-It is designed to receive a payment request, check risk, record the payment, post balanced ledger entries, update revenue records, and return a receipt that shows what happened.
+It receives a payment request, checks risk, records the payment, posts balanced ledger entries, updates revenue records, and returns a receipt that shows what happened.
 
 Archisynapse is its own business and system. Lyrica 3, Southern Arcade, other Empire-1 products, and outside companies may use it as customers.
 
@@ -14,22 +14,23 @@ The repository contains separate services for:
 - double-entry ledger posting
 - fraud and risk checks
 - revenue analytics
-- an API gateway
+- an authenticated API gateway
 - PostgreSQL storage
 - Redis support
 - signed royalty-event processing
 - idempotency and recovery paths
 
-The intended payment flow is:
+The payment flow is:
 
 ```text
 Merchant request
-  -> API gateway
+  -> merchant authentication
+  -> duplicate-request check
   -> risk check
   -> transaction service
   -> ledger posting
   -> analytics update
-  -> receipt
+  -> stored receipt
 ```
 
 The transaction service is the only service allowed to create financial ledger postings. The gateway coordinates the flow but does not write directly to the ledger.
@@ -43,10 +44,12 @@ The transaction service is the only service allowed to create financial ledger p
 | Double-entry ledger | Implemented | Continue reconciliation and failure testing |
 | Fraud service | Implemented as a risk service | Do not claim a detection rate until measured with a documented dataset |
 | Analytics service | Implemented | Validate reports against production-like transaction data |
-| API gateway | Implemented | Finish merchant authentication and remove local JSON state |
+| API gateway | Authenticated production entrypoint implemented | Run the full Docker and PostgreSQL boundary suite in CI |
+| Merchant authentication | Implemented | Add API-key rotation and merchant suspension endpoints |
+| Internal service credentials | Encrypted in PostgreSQL | Move the encryption key into a managed secret service before production |
+| Durable idempotency | Implemented with request-hash conflict checks | Add concurrency tests against PostgreSQL |
+| Durable payment receipts | Implemented in PostgreSQL | Add signed payment receipts and export verification |
 | Royalty event path | Implemented behind a disabled-by-default flag | Complete deployment verification with approved tenant keys |
-| Merchant authentication | In progress | Store hashed merchant keys and bind each request to one merchant |
-| Durable receipts | Partly implemented | Move all remaining payment receipts and idempotency state to PostgreSQL |
 | External settlement | Not proven | Add an approved processor or banking partner adapter |
 | Compliance certification | Not claimed | Complete the required audits before using certification language |
 | Performance and uptime | Not claimed | Run repeatable load and reliability tests and publish the evidence |
@@ -73,6 +76,12 @@ Requirements:
 - Docker with Compose support
 - available local ports used by `docker-compose.yml`
 
+Copy the local settings file and add secrets:
+
+```bash
+cp .env.example .env
+```
+
 Start the stack:
 
 ```bash
@@ -97,6 +106,8 @@ Check the gateway and its dependencies:
 curl http://127.0.0.1:9000/health
 ```
 
+Read the setup and verification flow in [`docs/GATEWAY_SETUP.md`](docs/GATEWAY_SETUP.md).
+
 ## Safety rules
 
 - Never store raw card details in this system.
@@ -104,20 +115,22 @@ curl http://127.0.0.1:9000/health
 - Every money amount must use fixed precision or minor units.
 - Every financial transaction must balance.
 - Repeated requests with the same idempotency key must not create duplicate money movement.
+- One idempotency key cannot be reused for a different request.
 - A failed fraud check must fail closed.
+- A merchant can access only its own payments and receipts.
 - The gateway must not post directly to the ledger.
 - A receipt must report partial or failed work honestly.
-- A product claim must link to current test, audit, benchmark, receipt, or customer evidence.
+- A product claim must link to a current test, audit, benchmark, receipt, or customer record.
 
 ## Immediate build priorities
 
-1. Replace local merchant credentials and payment receipt files with PostgreSQL records.
-2. Add hashed merchant API keys with one-time key reveal.
-3. Bind every payment request to its authenticated merchant.
-4. Add durable idempotency with request-hash conflict detection.
-5. Add a processor adapter boundary without pretending a live banking rail is connected.
-6. Add repeatable end-to-end tests that produce receipts and balanced-ledger evidence.
-7. Publish measured results only after the tests are run.
+1. Add a real payment-processor adapter behind a clean interface.
+2. Add PostgreSQL concurrency tests for duplicate payment requests.
+3. Move the remaining recovery queues from local files to PostgreSQL.
+4. Add merchant API-key rotation, revocation, and suspension.
+5. Sign payment receipts and provide a verification endpoint.
+6. Add repeatable end-to-end tests that prove balanced ledger entries and refunds.
+7. Run measured load tests before publishing any performance numbers.
 
 ## Product boundary
 
