@@ -106,6 +106,14 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/archisynapse
       TRANSACTION_SERVICE_URL: http://transaction-service:3000
       FRAUD_SERVICE_URL: http://fraud-service:8000
+      # --- Real Stripe card-acquiring layer (see docs/payments/STRIPE_SETUP.md) ---
+      # Unset by default -> Stripe endpoints return a clear 503. Set these to charge.
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:9000}
+      GATEWAY_SELF_URL: http://localhost:9000
+      STRIPE_DEFAULT_MERCHANT_ID: ${STRIPE_DEFAULT_MERCHANT_ID:-00000000-0000-0000-0000-000000000001}
       # Fails closed by default -- see spec/SPEC-royalty-loop-v1.md. Must
       # be explicitly flipped to "true" to activate the royalty loop.
       ROYALTY_LOOP_ENABLED: ${ROYALTY_LOOP_ENABLED:-false}
