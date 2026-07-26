@@ -5,6 +5,7 @@ on:
     paths:
       - "services/gateway/**"
       - "services/transaction/**"
+      - "tools/live-dollar-smoke/**"
       - "migrations/**"
       - "docker-compose.yml"
       - ".env.example"
@@ -15,6 +16,7 @@ on:
     paths:
       - "services/gateway/**"
       - "services/transaction/**"
+      - "tools/live-dollar-smoke/**"
       - "migrations/**"
       - "docker-compose.yml"
       - ".env.example"
@@ -58,13 +60,13 @@ jobs:
             psql -h 127.0.0.1 -U postgres -d archisynapse -v ON_ERROR_STOP=1 -f "${migration}"
           done
 
-      - name: Compile gateway files
-        working-directory: services/gateway
+      - name: Compile gateway and smoke runner files
         run: >-
           python -m py_compile
-          gateway_store.py
-          production_main.py
-          receipt_proof.py
+          services/gateway/gateway_store.py
+          services/gateway/production_main.py
+          services/gateway/receipt_proof.py
+          tools/live-dollar-smoke/app.py
 
       - name: Run gateway utility and proof tests
         working-directory: services/gateway
@@ -91,7 +93,9 @@ jobs:
       - name: Build transaction service
         run: npm run build --workspace=services/transaction
 
-      - name: Run processor proof tests
+      - name: Run processor proof and live smoke guard tests
         run: >-
           npm run test --workspace=services/transaction --
-          --run transaction-service-processor.test.ts
+          --run
+          transaction-service-processor.test.ts
+          transaction-service-live-smoke.test.ts
