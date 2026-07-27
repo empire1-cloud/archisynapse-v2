@@ -3,7 +3,7 @@ REAL BOUNDARY SUITE for the royalty receipt loop — Docker Postgres,
 real ledger-service, real transaction-service, real fraud-service, real
 gateway. No mock/SQLite ledger anywhere in this file. Requires:
   - `docker compose up -d postgres redis` already running
-  - migrations 000-004 applied to that Postgres
+  - migrations 000-006 applied to that Postgres
   - node_modules present at repo root (for tsx)
 
 Run: python3 test_royalty_real_suite.py
@@ -58,7 +58,8 @@ def now_iso(offset: timedelta = timedelta()) -> str:
 
 def make_event(idempotency_key: str, event_id: str = None, amount_value: str = "1.2500",
                 splits=None, occurred_at: str = None, actor_id: str = "usr_listener_42",
-                vics_proof_id: str = "vics_01H_valid") -> dict:
+                vics_proof_id: str = "vics_01H_valid", trigger_kind: str = "remix",
+                trigger_source_ref: str = "lyrica://remix/rmx_7788") -> dict:
     return {
         "schema_version": "1.0",
         "event_id": event_id or f"evt_{idempotency_key}",
@@ -79,7 +80,7 @@ def make_event(idempotency_key: str, event_id: str = None, amount_value: str = "
         },
         "creator": {"creator_id": "cre_a1b2c3", "identity_ref": "sla113://identity/cre_a1b2c3"},
         "splits": splits or [{"owner_id": "cre_a1b2c3", "bps": 10000}],
-        "trigger": {"kind": "remix", "source_ref": "lyrica://remix/rmx_7788", "actor_id": actor_id},
+        "trigger": {"kind": trigger_kind, "source_ref": trigger_source_ref, "actor_id": actor_id},
         "amount": {"currency": "USD", "value": amount_value},
     }
 
@@ -157,6 +158,11 @@ def start_services(royalty_loop_enabled: str = "true") -> dict:
         "ROYALTY_LOOP_ENABLED": royalty_loop_enabled,
         "ROYALTY_ADMIN_TOKEN": ADMIN_TOKEN,
         "ROYALTY_TEST_FIXTURES_ENABLED": "true",
+        "ROYALTY_TEST_AUTHZ_PRINCIPALS": json.dumps({
+            "policy-admin-token": {"tenant_id": TENANT_ID, "role": "policy_admin"},
+            "wrong-role-token": {"tenant_id": TENANT_ID, "role": "viewer"},
+            "wrong-tenant-token": {"tenant_id": f"other-{TENANT_ID}", "role": "policy_admin"},
+        }),
     }
     gateway = subprocess.Popen(
         [sys.executable, "-c", f"import uvicorn; uvicorn.run('main:app', host='127.0.0.1', port={GATEWAY_PORT}, log_level='warning')"],
@@ -206,10 +212,24 @@ async def run_suite() -> bool:
             ok = ok and receipt.get("payouts") == [{"owner_id": "cre_a1b2c3", "amount": "1.2500", "state": "paid"}]
             row = await pool.fetchrow("SELECT * FROM royalty_obligations WHERE event_id=$1", event["event_id"])
             ok = ok and row is not None and row["status"] == "POSTED"
-            journal = await pool.fetch("SELECT debit_credit, amount FROM journal_entries WHERE transaction_id=$1", row["ledger_transaction_id"]) if row else []
+            journal = await pool.fetch(
+                """
+                SELECT a.code, je.debit_credit, je.amount
+                FROM journal_entries je
+                JOIN accounts a ON a.id = je.account_id
+                WHERE je.transaction_id=$1
+                ORDER BY a.code
+                """,
+                row["ledger_transaction_id"],
+            ) if row else []
             debits = sum(float(r["amount"]) for r in journal if r["debit_credit"] == "DEBIT")
             credits = sum(float(r["amount"]) for r in journal if r["debit_credit"] == "CREDIT")
+            account_effects = {(r["code"], r["debit_credit"], str(r["amount"])) for r in journal}
             ok = ok and abs(debits - credits) < 0.0001 and abs(debits - 1.25) < 0.0001
+            ok = ok and account_effects == {
+                ("cre_a1b2c3", "CREDIT", "1.2500"),
+                ("royalty_expense", "DEBIT", "1.2500"),
+            }
             record("AT-01", "happy path, single owner, $1.2500", ok, f"status={resp.status_code} balanced={debits}=={credits}")
             at01_receipt_id = receipt.get("receipt_id")
             at01_ledger_txn = row["ledger_transaction_id"] if row else None
@@ -282,30 +302,121 @@ async def run_suite() -> bool:
             resp8 = await post_event(client, risk_event, private_key_b64, "lyr-k1", gateway_url)
             body8 = resp8.json()
             row8 = await pool.fetchrow("SELECT * FROM royalty_obligations WHERE event_id=$1", risk_event["event_id"])
-            journal8 = await pool.fetch("SELECT debit_credit, amount FROM journal_entries WHERE transaction_id=$1", row8["ledger_transaction_id"]) if row8 else []
+            journal8 = await pool.fetch(
+                """
+                SELECT a.code, je.debit_credit, je.amount
+                FROM journal_entries je
+                JOIN accounts a ON a.id = je.account_id
+                WHERE je.transaction_id=$1
+                ORDER BY a.code
+                """,
+                row8["ledger_transaction_id"],
+            ) if row8 else []
+            effects8 = {(r["code"], r["debit_credit"], str(r["amount"])) for r in journal8}
             ok8 = (resp8.status_code == 201 and body8.get("status") == "held" and row8 is not None
-                   and row8["status"] == "HELD" and len(journal8) == 2)
+                   and row8["status"] == "HELD" and effects8 == {
+                       ("royalty_expense", "DEBIT", "1.2500"),
+                       ("royalty_held_liab", "CREDIT", "1.2500"),
+                   })
             record("AT-08", "high-risk hold -> held liability, no payable", ok8, f"status={resp8.status_code} db_status={row8['status'] if row8 else None}")
             at08_event_id = risk_event["event_id"]
 
             # ---- AT-09: release of held event, then release again x2 ----
-            release_headers = {"X-Tenant-Id": TENANT_ID}
+            missing_auth = await client.post(
+                f"{gateway_url}/api/v1/events/{at08_event_id}/release"
+            )
+            wrong_role = await client.post(
+                f"{gateway_url}/api/v1/events/{at08_event_id}/release",
+                headers={"Authorization": "Bearer wrong-role-token"},
+            )
+            wrong_tenant = await client.post(
+                f"{gateway_url}/api/v1/events/{at08_event_id}/release",
+                headers={
+                    "Authorization": "Bearer wrong-tenant-token",
+                    "X-Tenant-Id": TENANT_ID,
+                },
+            )
+            held_after_denials = await pool.fetchval(
+                "SELECT status FROM royalty_obligations WHERE event_id=$1",
+                at08_event_id,
+            )
+            release_headers = {
+                "Authorization": "Bearer policy-admin-token",
+                "X-Tenant-Id": TENANT_ID,
+            }
             r1 = await client.post(f"{gateway_url}/api/v1/events/{at08_event_id}/release", headers=release_headers)
             r2 = await client.post(f"{gateway_url}/api/v1/events/{at08_event_id}/release", headers=release_headers)
             r3 = await client.post(f"{gateway_url}/api/v1/events/{at08_event_id}/release", headers=release_headers)
             row9 = await pool.fetchrow("SELECT * FROM royalty_obligations WHERE event_id=$1", at08_event_id)
-            ok9 = (r1.status_code == 200 and r2.status_code == 200 and r3.status_code == 200
-                   and r1.json().get("receipt_id") and row9 is not None and row9["status"] == "POSTED")
+            release_effects = await pool.fetch(
+                """
+                SELECT a.code, je.debit_credit, je.amount
+                FROM journal_entries je
+                JOIN accounts a ON a.id = je.account_id
+                WHERE je.transaction_id=$1
+                ORDER BY a.code
+                """,
+                row9["release_ledger_transaction_id"] if row9 else None,
+            )
+            release_effect_set = {
+                (r["code"], r["debit_credit"], str(r["amount"]))
+                for r in release_effects
+            }
+            ok9 = (
+                missing_auth.status_code == 403
+                and wrong_role.status_code == 403
+                and wrong_tenant.status_code == 403
+                and held_after_denials == "HELD"
+                and r1.status_code == 200
+                and r2.status_code == 200
+                and r3.status_code == 200
+                and r1.json() == r2.json() == r3.json()
+                and r1.json().get("receipt_id")
+                and row9 is not None
+                and row9["status"] == "POSTED"
+                and row9["initial_ledger_transaction_id"] == row8["ledger_transaction_id"]
+                and release_effect_set == {
+                    ("cre_a1b2c3", "CREDIT", "1.2500"),
+                    ("royalty_held_liab", "DEBIT", "1.2500"),
+                }
+            )
             record("AT-09", "release held event, repeat release deterministically 200", ok9,
                    f"statuses={r1.status_code},{r2.status_code},{r3.status_code} db_status={row9['status'] if row9 else None}")
 
             # ---- AT-10: hard policy block ----
-            block_event = make_event(f"at10-{RUN_ID}", vics_proof_id="vics_revoked_test_fixture")
-            # Reuse ownership-invalid path as the concrete "hard block" fixture available in this v1
-            # decision engine (no separate license-policy table exists yet -- flagged in final report).
+            block_event = make_event(
+                f"at10-{RUN_ID}",
+                trigger_kind="license",
+                trigger_source_ref="license_denied_test_fixture",
+            )
             resp10 = await post_event(client, block_event, private_key_b64, "lyr-k1", gateway_url)
-            ok10 = resp10.status_code == 422 and resp10.json().get("status") == "blocked"
-            record("AT-10", "hard policy block -> zero financial entries (via ownership_invalid fixture)", ok10, f"status={resp10.status_code}")
+            resp10_replay = await post_event(
+                client, block_event, private_key_b64, "lyr-k1", gateway_url
+            )
+            block_row = await pool.fetchrow(
+                "SELECT * FROM royalty_obligations WHERE event_id=$1",
+                block_event["event_id"],
+            )
+            block_journal = (
+                await pool.fetch(
+                    "SELECT 1 FROM journal_entries WHERE transaction_id=$1",
+                    block_row["ledger_transaction_id"],
+                )
+                if block_row and block_row["ledger_transaction_id"]
+                else []
+            )
+            ok10 = (
+                resp10.status_code == 201
+                and resp10_replay.status_code == 200
+                and resp10_replay.json() == resp10.json()
+                and resp10.json().get("status") == "blocked"
+                and resp10.json().get("decision", {}).get("policy") == "license_policy_denied"
+                and block_row is not None
+                and block_row["status"] == "BLOCKED"
+                and block_row["ledger_transaction_id"] is None
+                and not block_journal
+            )
+            record("AT-10", "hard license-policy block -> zero financial entries", ok10, f"status={resp10.status_code}")
 
             # ---- AT-11: reversal + retry ----
             reversal_body = {
@@ -314,30 +425,122 @@ async def run_suite() -> bool:
                 "reason": "test_reversal",
             }
             rev1 = await client.post(f"{gateway_url}/api/v1/events/{event['event_id']}/reverse",
-                                      json=reversal_body, headers={"X-Tenant-Id": TENANT_ID})
+                                      json=reversal_body, headers=release_headers)
             rev2 = await client.post(f"{gateway_url}/api/v1/events/{event['event_id']}/reverse",
-                                      json=reversal_body, headers={"X-Tenant-Id": TENANT_ID})
+                                      json=reversal_body, headers=release_headers)
             row11 = await pool.fetchrow("SELECT * FROM royalty_obligations WHERE event_id=$1", event["event_id"])
-            trial = await pool.fetch("SELECT balance FROM trial_balance")
-            trial_delta = sum(float(r["balance"]) for r in trial)
-            ok11 = (rev1.status_code == 201 and rev2.json().get("receipt_id") == rev1.json().get("receipt_id")
-                    and row11["status"] == "REVERSED" and abs(trial_delta) < 0.0001)
-            record("AT-11", "reversal, retry idempotent, trial balance stays zero", ok11,
-                   f"statuses={rev1.status_code},{rev2.status_code} db_status={row11['status']} trial_delta={trial_delta}")
+            reversal_row = await pool.fetchrow(
+                """
+                SELECT reversal_ledger_transaction_id
+                FROM royalty_reversals
+                WHERE organization_id=$1 AND reversal_event_id=$2
+                """,
+                TENANT_ID,
+                reversal_body["reversal_event_id"],
+            )
+            original_effects = await pool.fetch(
+                """
+                SELECT account_id, debit_credit, amount
+                FROM journal_entries WHERE transaction_id=$1
+                """,
+                at01_ledger_txn,
+            )
+            reversal_effects = await pool.fetch(
+                """
+                SELECT account_id, debit_credit, amount
+                FROM journal_entries WHERE transaction_id=$1
+                """,
+                reversal_row["reversal_ledger_transaction_id"] if reversal_row else None,
+            )
+            original_set = {
+                (str(r["account_id"]), r["debit_credit"], str(r["amount"]))
+                for r in original_effects
+            }
+            inverse_set = {
+                (
+                    str(r["account_id"]),
+                    "CREDIT" if r["debit_credit"] == "DEBIT" else "DEBIT",
+                    str(r["amount"]),
+                )
+                for r in reversal_effects
+            }
+            ok11 = (
+                rev1.status_code == 201
+                and rev2.status_code == 200
+                and rev2.json() == rev1.json()
+                and row11["status"] == "REVERSED"
+                and reversal_row is not None
+                and original_set == inverse_set
+            )
+            record("AT-11", "event-specific reversal linkage and deterministic replay", ok11,
+                   f"statuses={rev1.status_code},{rev2.status_code} db_status={row11['status']}")
 
             # ---- AT-13: correlation thread ----
             receipt01 = await client.get(f"{gateway_url}/api/v1/receipts/{at01_receipt_id}")
             corr_id = event["correlation_id"]
-            db_corr = await pool.fetchrow("SELECT correlation_id FROM royalty_obligations WHERE event_id=$1", event["event_id"])
-            ok13 = (receipt01.status_code == 200 and receipt01.json()["correlation_id"] == corr_id
-                    and db_corr["correlation_id"] == corr_id)
-            record("AT-13", "one correlation_id across gateway request, obligation row, and receipt", ok13, corr_id)
+            db_corr = await pool.fetchrow(
+                "SELECT correlation_id FROM royalty_obligations WHERE event_id=$1",
+                event["event_id"],
+            )
+            gateway_corr = await pool.fetchrow(
+                """
+                SELECT rr.correlation_id
+                FROM royalty_idempotency ri
+                JOIN royalty_receipts rr ON rr.receipt_id = ri.receipt_id
+                WHERE ri.tenant_id=$1 AND ri.idempotency_key=$2
+                """,
+                TENANT_ID,
+                event["idempotency_key"],
+            )
+            ledger_corr = await pool.fetchval(
+                """
+                SELECT metadata->>'correlationId'
+                FROM journal_entries
+                WHERE transaction_id=$1
+                LIMIT 1
+                """,
+                at01_ledger_txn,
+            )
+            ok13 = (
+                receipt01.status_code == 200
+                and receipt01.json()["correlation_id"] == corr_id
+                and db_corr["correlation_id"] == corr_id
+                and gateway_corr["correlation_id"] == corr_id
+                and ledger_corr == corr_id
+            )
+            record(
+                "AT-13",
+                "one correlation_id across gateway state, transaction, ledger metadata, and receipt",
+                ok13,
+                corr_id,
+            )
 
             # ---- AT-15: stale event + boundary values ----
             stale_event = make_event(f"at15-{RUN_ID}", occurred_at=now_iso(timedelta(minutes=-30)))
             resp15 = await post_event(client, stale_event, private_key_b64, "lyr-k1", gateway_url)
             no_row15 = await pool.fetchrow("SELECT 1 FROM royalty_obligations WHERE event_id=$1", stale_event["event_id"])
-            ok15 = resp15.status_code == 422 and resp15.json().get("detail", {}).get("code") == "stale_event" and no_row15 is None
+            no_idempotency15 = await pool.fetchrow(
+                "SELECT 1 FROM royalty_idempotency WHERE tenant_id=$1 AND idempotency_key=$2",
+                TENANT_ID,
+                stale_event["idempotency_key"],
+            )
+            no_receipt15 = await pool.fetchrow(
+                "SELECT 1 FROM royalty_receipts WHERE event_id=$1",
+                stale_event["event_id"],
+            )
+            rejection15 = await pool.fetchrow(
+                "SELECT reason FROM royalty_rejections WHERE correlation_id=$1 ORDER BY occurred_at DESC LIMIT 1",
+                stale_event["correlation_id"],
+            )
+            ok15 = (
+                resp15.status_code == 422
+                and resp15.json().get("detail", {}).get("code") == "stale_event"
+                and no_row15 is None
+                and no_idempotency15 is None
+                and no_receipt15 is None
+                and rejection15 is not None
+                and rejection15["reason"] == "stale_event"
+            )
 
             boundary_ok_event = make_event(f"at15b-{RUN_ID}", occurred_at=now_iso(timedelta(minutes=-4, seconds=-59)))
             resp15b = await post_event(client, boundary_ok_event, private_key_b64, "lyr-k1", gateway_url)

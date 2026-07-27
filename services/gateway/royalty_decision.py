@@ -88,6 +88,11 @@ class OwnershipVerifier(Protocol):
         ...
 
 
+class LicensePolicyEvaluator(Protocol):
+    async def permits(self, trigger_kind: str, source_ref: str) -> bool:
+        ...
+
+
 class FailClosedOwnershipVerifier:
     """Production-safe fallback: unavailable ownership proof is never valid."""
 
@@ -220,6 +225,24 @@ class TestFixtureOwnershipVerifier:
         return vics_proof_id not in self.REVOKED_PROOF_IDS
 
 
+class FailClosedLicensePolicyEvaluator:
+    """Allow non-license triggers; deny licenses until real policy evidence exists."""
+
+    async def permits(self, trigger_kind: str, source_ref: str) -> bool:
+        return trigger_kind != "license"
+
+
+class TestFixtureLicensePolicyEvaluator:
+    """TEST-ONLY explicit denied-license fixture for AT-10."""
+
+    DENIED_SOURCE_REFS = {"license_denied_test_fixture"}
+
+    async def permits(self, trigger_kind: str, source_ref: str) -> bool:
+        return not (
+            trigger_kind == "license" and source_ref in self.DENIED_SOURCE_REFS
+        )
+
+
 class _RiskFixture:
     """TEST-ONLY high-risk actor list — see module docstring."""
 
@@ -244,6 +267,11 @@ def _select_ownership_verifier() -> OwnershipVerifier:
 
 
 ownership_verifier: OwnershipVerifier = _select_ownership_verifier()
+license_policy_evaluator: LicensePolicyEvaluator = (
+    TestFixtureLicensePolicyEvaluator()
+    if ROYALTY_TEST_FIXTURES_ENABLED
+    else FailClosedLicensePolicyEvaluator()
+)
 
 
 async def _ensure_fraud_merchant(client: httpx.AsyncClient, tenant_id: str) -> str:
@@ -276,6 +304,8 @@ async def evaluate_decision(
     creator_id: str,
     idempotency_key: str,
     trigger_actor_id: str,
+    trigger_kind: str,
+    trigger_source_ref: str,
     amount: str,
 ) -> Decision:
     ownership_ok = await ownership_verifier.verify(
@@ -287,6 +317,14 @@ async def evaluate_decision(
     )
     if not ownership_ok:
         return Decision(outcome="block", policy="ownership_invalid", risk_score=1.0, reasons=["vics_invalid"])
+
+    if not await license_policy_evaluator.permits(trigger_kind, trigger_source_ref):
+        return Decision(
+            outcome="block",
+            policy="license_policy_denied",
+            risk_score=1.0,
+            reasons=["license_not_authorized"],
+        )
 
     is_high_risk_fixture = ROYALTY_TEST_FIXTURES_ENABLED and trigger_actor_id in _RiskFixture.HIGH_RISK_ACTOR_IDS
     # sudden_usage_spike alone (+25) doesn't cross even the lowest real

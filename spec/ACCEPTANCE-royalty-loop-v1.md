@@ -13,7 +13,7 @@ Remix in Lyrica → signed `royalty.obligation.created`, splits `[{A, 10000}]`.
 ## AT-02 · Idempotent retry
 
 Re-send AT-01's exact request (same `idempotency_key`, same body) 3×, including once concurrently with the original.
-**Expect:** every response 200 with a byte-identical receipt (`receipt_id` unchanged). Transaction count for the event = 1. Ledger journal count = 1. No duplicate payable.
+**Expect:** while the original claim is still `PROCESSING`, an overlapping duplicate may receive `409 processing` and MUST retry with the same identity. After completion, every retry returns 200 with a byte-identical stored receipt (`receipt_id` unchanged). Transaction count for the event = 1. Ledger journal count = 1. No duplicate payable.
 
 ## AT-03 · Idempotency conflict
 

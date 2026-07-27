@@ -217,6 +217,8 @@ async def process_obligation_created(
             creator_id=event.creator.creator_id,
             idempotency_key=event.idempotency_key,
             trigger_actor_id=event.trigger.actor_id,
+            trigger_kind=event.trigger.kind,
+            trigger_source_ref=event.trigger.source_ref,
             amount=event.amount.value,
         )
 
@@ -267,6 +269,11 @@ async def process_obligation_created(
 async def release_obligation(
     tenant_id: str, event_id: str, transaction_client: RoyaltyTransactionClient
 ) -> tuple[dict, int]:
+    receipt_id = f"rcp_rel_{event_id}"
+    existing_receipt = await state.load_royalty_receipt(receipt_id)
+    if existing_receipt is not None:
+        return existing_receipt, 200
+
     organization_id = tenant_resolver.resolve(tenant_id)
     idempotency_key = f"release-{event_id}"
     try:
@@ -280,7 +287,6 @@ async def release_obligation(
             "code": "retry_later", "message": "transaction service unavailable", "retryable": True
         })
 
-    receipt_id = f"rcp_rel_{event_id}"
     receipt = _receipt_from_obligation(obligation, receipt_id)
     await state.save_royalty_receipt(receipt)
     return receipt, 200
@@ -294,6 +300,11 @@ async def reverse_obligation(
     reason: str,
     transaction_client: RoyaltyTransactionClient,
 ) -> tuple[dict, int]:
+    receipt_id = f"rcp_rev_{reversal_event_id}"
+    existing_receipt = await state.load_royalty_receipt(receipt_id)
+    if existing_receipt is not None:
+        return existing_receipt, 200
+
     organization_id = tenant_resolver.resolve(tenant_id)
     try:
         obligation, status_code = await transaction_client.reverse_obligation(
@@ -308,7 +319,6 @@ async def reverse_obligation(
             "code": "retry_later", "message": "transaction service unavailable", "retryable": True
         })
 
-    receipt_id = f"rcp_rev_{reversal_event_id}"
     receipt = _receipt_from_obligation(obligation, receipt_id)
     await state.save_royalty_receipt(receipt)
     return receipt, status_code

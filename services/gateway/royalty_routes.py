@@ -11,6 +11,11 @@ from pydantic import BaseModel
 
 import royalty_state as state
 from royalty_admin_auth import require_admin
+from royalty_authz import (
+    AuthorizationDenied,
+    require_obligation_tenant,
+    resolve_policy_principal,
+)
 from royalty_keys import gateway_receipt_signer
 from royalty_orchestrator import (
     RoyaltyRejection,
@@ -57,6 +62,60 @@ class ReverseRequest(BaseModel):
     reversal_event_id: str
     reversal_idempotency_key: str
     reason: str
+
+
+def _bearer_token(request: Request) -> str | None:
+    authorization = request.headers.get("authorization", "")
+    if not authorization.startswith("Bearer "):
+        return None
+    return authorization[len("Bearer "):].strip() or None
+
+
+async def _authorize_obligation_action(request: Request, event_id: str) -> tuple[str, dict]:
+    """Resolve policy identity, then bind it to the persisted obligation.
+
+    X-Tenant-Id is accepted only as an optional consistency assertion; it
+    never grants access. The bearer principal chooses the scoped lookup,
+    and the persisted transaction-service obligation is checked again
+    before any release or reversal is attempted.
+    """
+    try:
+        principal = await resolve_policy_principal(_bearer_token(request))
+    except AuthorizationDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "forbidden", "reason": exc.reason},
+        ) from exc
+
+    claimed_tenant = request.headers.get("x-tenant-id")
+    if claimed_tenant and claimed_tenant != principal.tenant_id:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "forbidden", "reason": "wrong_tenant"},
+        )
+
+    organization_id = principal.tenant_id
+    try:
+        obligation = await royalty_transaction_client.get_obligation(organization_id, event_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "retry_later", "message": "transaction service unavailable"},
+        ) from exc
+    if obligation is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "not_found", "message": "royalty obligation not found"},
+        )
+
+    try:
+        require_obligation_tenant(principal, obligation["tenantId"])
+    except AuthorizationDenied as exc:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "forbidden", "reason": exc.reason},
+        ) from exc
+    return principal.tenant_id, obligation
 
 
 @royalty_router.post("/admin/tenants/{tenant_id}/keys", dependencies=[Depends(require_admin)])
@@ -113,9 +172,7 @@ async def release_royalty_event(event_id: str, request: Request):
     if not _feature_enabled():
         return _feature_disabled_response()
 
-    tenant_id = request.headers.get("x-tenant-id")
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail={"code": "invalid_schema", "message": "X-Tenant-Id header is required"})
+    tenant_id, _obligation = await _authorize_obligation_action(request, event_id)
 
     try:
         receipt, status_code = await release_obligation(tenant_id, event_id, royalty_transaction_client)
@@ -135,9 +192,7 @@ async def reverse_royalty_event(event_id: str, request: Request, body: ReverseRe
     if not _feature_enabled():
         return _feature_disabled_response()
 
-    tenant_id = request.headers.get("x-tenant-id")
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail={"code": "invalid_schema", "message": "X-Tenant-Id header is required"})
+    tenant_id, _obligation = await _authorize_obligation_action(request, event_id)
 
     try:
         receipt, status_code = await reverse_obligation(

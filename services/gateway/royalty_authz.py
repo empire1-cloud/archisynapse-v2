@@ -16,6 +16,7 @@ and holds a small fixed token->principal map — never activates by
 accident.
 """
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Optional, Protocol
@@ -46,8 +47,10 @@ class FailClosedAuthorizationAdapter:
 class TestFixtureAuthorizationAdapter:
     """TEST-ONLY — see module docstring. Never selected unless explicitly enabled."""
 
-    def __init__(self):
-        self._tokens: dict[str, AuthorizedPrincipal] = {}
+    __test__ = False
+
+    def __init__(self, principals: Optional[dict[str, AuthorizedPrincipal]] = None):
+        self._tokens: dict[str, AuthorizedPrincipal] = principals or {}
 
     def register(self, token: str, tenant_id: str, role: str) -> None:
         self._tokens[token] = AuthorizedPrincipal(tenant_id=tenant_id, role=role)
@@ -56,9 +59,36 @@ class TestFixtureAuthorizationAdapter:
         return self._tokens.get(bearer_token)
 
 
+def _load_test_principals() -> dict[str, AuthorizedPrincipal]:
+    """Load explicit test-only principals from a JSON environment value.
+
+    The value is deliberately ignored unless ROYALTY_TEST_FIXTURES_ENABLED
+    is true. This lets subprocess acceptance tests configure principals
+    without adding a production token registry or hard-coded credentials.
+    """
+    raw = os.getenv("ROYALTY_TEST_AUTHZ_PRINCIPALS", "{}")
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("ROYALTY_TEST_AUTHZ_PRINCIPALS must be valid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("ROYALTY_TEST_AUTHZ_PRINCIPALS must be a JSON object")
+
+    principals: dict[str, AuthorizedPrincipal] = {}
+    for token, value in parsed.items():
+        if not isinstance(token, str) or not isinstance(value, dict):
+            raise RuntimeError("test authorization principals must map token strings to objects")
+        tenant_id = value.get("tenant_id")
+        role = value.get("role")
+        if not isinstance(tenant_id, str) or not isinstance(role, str):
+            raise RuntimeError("each test authorization principal needs tenant_id and role")
+        principals[token] = AuthorizedPrincipal(tenant_id=tenant_id, role=role)
+    return principals
+
+
 def _select_adapter() -> AuthorizationAdapter:
     if ROYALTY_TEST_FIXTURES_ENABLED:
-        return TestFixtureAuthorizationAdapter()
+        return TestFixtureAuthorizationAdapter(_load_test_principals())
     return FailClosedAuthorizationAdapter()
 
 
@@ -71,12 +101,8 @@ class AuthorizationDenied(Exception):
         self.reason = reason
 
 
-async def authorize_policy_action(bearer_token: Optional[str], obligation_tenant_id: str) -> AuthorizedPrincipal:
-    """
-    Raises AuthorizationDenied (never returns a falsy/ambiguous result) unless
-    the token resolves to a principal with the required role AND whose
-    tenant_id matches the PERSISTED obligation's tenant_id.
-    """
+async def resolve_policy_principal(bearer_token: Optional[str]) -> AuthorizedPrincipal:
+    """Resolve a policy-admin principal without trusting caller tenant headers."""
     if not bearer_token:
         raise AuthorizationDenied("missing_auth")
 
@@ -87,7 +113,25 @@ async def authorize_policy_action(bearer_token: Optional[str], obligation_tenant
     if principal.role != RELEASE_REQUIRED_ROLE:
         raise AuthorizationDenied("wrong_role")
 
+    return principal
+
+
+def require_obligation_tenant(
+    principal: AuthorizedPrincipal, obligation_tenant_id: str
+) -> AuthorizedPrincipal:
+    """Bind an already-authorized principal to persisted obligation tenancy."""
     if principal.tenant_id != obligation_tenant_id:
         raise AuthorizationDenied("wrong_tenant")
-
     return principal
+
+
+async def authorize_policy_action(
+    bearer_token: Optional[str], obligation_tenant_id: str
+) -> AuthorizedPrincipal:
+    """
+    Raises AuthorizationDenied (never returns a falsy/ambiguous result) unless
+    the token resolves to a principal with the required role AND whose
+    tenant_id matches the PERSISTED obligation's tenant_id.
+    """
+    principal = await resolve_policy_principal(bearer_token)
+    return require_obligation_tenant(principal, obligation_tenant_id)

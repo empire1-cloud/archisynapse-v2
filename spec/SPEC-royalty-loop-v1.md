@@ -153,6 +153,7 @@ Receipts are signed by Archisynapse so Lyrica (and creators) can verify them ind
 | 400 | `invalid_schema` | Malformed body / bad bps sum / bad amount format | Fix and re-emit with NEW idempotency key |
 | 401 | `invalid_signature` | Signature does not verify | Alert; do not retry until keys fixed |
 | 403 | `unknown_key` / `tenant_mismatch` | Key not registered / key ≠ tenant | Alert; config issue |
+| 409 | `processing` | Same key and payload; original request still in flight | Retry/poll with the SAME identity |
 | 409 | `idempotency_conflict` | Same key, different payload | Bug on Lyrica side; alert, never retry |
 | 422 | `ownership_invalid` / `stale_event` | VICS/DNA check failed / replay window | Surface to creator (blocked) / re-sign fresh |
 | 503 | `retry_later` | Archisynapse unavailable | Outbox retry w/ exponential backoff, SAME idempotency key |

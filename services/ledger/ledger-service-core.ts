@@ -259,7 +259,8 @@ export class LedgerService {
   async reverseTransaction(
     organizationId: string,
     transactionId: string,
-    reason: string
+    reason: string,
+    idempotencyKey?: string
   ): Promise<Transaction> {
     const client = await this.pool.connect();
     try {
@@ -308,6 +309,7 @@ export class LedgerService {
         amount: new Decimal(original.amount),
         currency: original.currency,
         entries: reversalEntries,
+        idempotencyKey,
         metadata: { originalTransactionId: transactionId },
       });
 
@@ -484,7 +486,10 @@ export class LedgerService {
     idempotencyKey: string
   ): Promise<Transaction | null> {
     const result = await client.query(
-      `SELECT response FROM idempotency_store WHERE idempotency_key = $1 AND expires_at > NOW()`,
+      `SELECT response
+       FROM idempotency_store
+       WHERE idempotency_key = $1
+         AND (expires_at > NOW() OR idempotency_key LIKE 'royalty:%')`,
       [idempotencyKey]
     );
 
@@ -502,7 +507,11 @@ export class LedgerService {
     response: Transaction
   ): Promise<void> {
     const requestHash = crypto.createHash('sha256').update(JSON.stringify(request)).digest('hex');
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    // Financial royalty keys are permanent replay boundaries. Other
+    // transaction domains retain the existing 24-hour cache behavior.
+    const expiresAt = idempotencyKey.startsWith('royalty:')
+      ? new Date('9999-12-31T23:59:59.999Z')
+      : new Date(Date.now() + 24 * 60 * 60 * 1000);
 
     await client.query(
       `INSERT INTO idempotency_store (idempotency_key, organization_id, request_hash, response, expires_at)

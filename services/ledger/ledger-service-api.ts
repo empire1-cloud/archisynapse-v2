@@ -181,6 +181,7 @@ export function initLedgerAPI(ledgerService: LedgerService) {
     try {
       const schema = Joi.object({
         reason: Joi.string().required(),
+        idempotencyKey: Joi.string().optional(),
       });
 
       const { error, value } = schema.validate(req.body);
@@ -191,7 +192,8 @@ export function initLedgerAPI(ledgerService: LedgerService) {
       const reversedTxn = await ledgerService.reverseTransaction(
         (req as any).organizationId,
         req.params.id as string,
-        value.reason
+        value.reason,
+        value.idempotencyKey
       );
 
       res.status(201).json(reversedTxn);

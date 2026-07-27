@@ -83,7 +83,10 @@ export function initRoyaltyAPI(royaltyService: RoyaltyService): Router {
 
   router.get('/royalties/:eventId', async (req: Request, res: Response) => {
     try {
-      const obligation = await royaltyService.getObligationByEventId(req.params.eventId as string);
+      const obligation = await royaltyService.getObligationByEventId(
+        (req as any).organizationId,
+        req.params.eventId as string
+      );
       res.json(obligation);
     } catch (err: any) {
       if (err instanceof RoyaltyObligationNotFoundError) {
@@ -99,6 +102,7 @@ export function initRoyaltyAPI(royaltyService: RoyaltyService): Router {
       const idempotencyKey =
         (req.headers['idempotency-key'] as string) || `release-${req.params.eventId}`;
       const obligation = await royaltyService.releaseObligation(
+        (req as any).organizationId,
         req.params.eventId as string,
         idempotencyKey
       );
@@ -128,6 +132,7 @@ export function initRoyaltyAPI(royaltyService: RoyaltyService): Router {
       }
 
       const { obligation, replayed } = await royaltyService.reverseObligation(
+        (req as any).organizationId,
         req.params.eventId as string,
         value.reversalEventId,
         value.reversalIdempotencyKey,

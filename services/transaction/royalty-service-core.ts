@@ -37,9 +37,16 @@ export class RoyaltyService {
   async createObligation(req: CreateRoyaltyObligationRequest): Promise<RoyaltyObligation> {
     const client = await this.pool.connect();
     try {
+      await client.query('BEGIN');
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
+        [`royalty:${req.organizationId}:${req.eventId}`]
+      );
+
       const existing = await client.query(
-        `SELECT * FROM royalty_obligations WHERE idempotency_key = $1`,
-        [req.idempotencyKey]
+        `SELECT * FROM royalty_obligations
+         WHERE organization_id = $1 AND idempotency_key = $2`,
+        [req.organizationId, req.idempotencyKey]
       );
       if (existing.rows.length > 0) {
         const row = existing.rows[0];
@@ -48,7 +55,19 @@ export class RoyaltyService {
             `idempotency_key ${req.idempotencyKey} reused with a different payload`
           );
         }
+        await client.query('COMMIT');
         return this.loadObligation(client, row.id);
+      }
+
+      const capturedEvent = await client.query(
+        `SELECT id FROM royalty_obligations
+         WHERE organization_id = $1 AND event_id = $2`,
+        [req.organizationId, req.eventId]
+      );
+      if (capturedEvent.rows.length > 0) {
+        throw new RoyaltyIdempotencyConflictError(
+          `event_id ${req.eventId} was already captured under a different idempotency key`
+        );
       }
 
       let status: RoyaltyStatus;
@@ -62,6 +81,7 @@ export class RoyaltyService {
         const ledgerTxn = await this.ledgerClient.postHold({
           organizationId: req.organizationId,
           eventId: req.eventId,
+          correlationId: req.correlationId,
           idempotencyKey: req.idempotencyKey,
           gross: req.amount,
         });
@@ -72,6 +92,7 @@ export class RoyaltyService {
         const ledgerTxn = await this.ledgerClient.postAllow({
           organizationId: req.organizationId,
           eventId: req.eventId,
+          correlationId: req.correlationId,
           idempotencyKey: req.idempotencyKey,
           gross: req.amount,
           payouts: breakdown.payouts,
@@ -81,14 +102,13 @@ export class RoyaltyService {
       }
 
       const id = uuidv4();
-      await client.query('BEGIN');
-      try {
-        await client.query(
-          `INSERT INTO royalty_obligations
+      await client.query(
+        `INSERT INTO royalty_obligations
             (id, organization_id, event_id, correlation_id, idempotency_key, tenant_id,
              track_id, creator_id, trigger_kind, amount, currency, splits, status,
-             decision_policy, risk_score, status_reasons, ledger_transaction_id, request_hash)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+             decision_policy, risk_score, status_reasons, ledger_transaction_id,
+             initial_ledger_transaction_id, request_hash)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
           [
             id,
             req.organizationId,
@@ -107,35 +127,40 @@ export class RoyaltyService {
             req.riskScore,
             JSON.stringify(req.statusReasons),
             ledgerTransactionId,
+            ledgerTransactionId,
             req.requestHash,
           ]
-        );
-        for (const payout of payouts) {
-          await client.query(
-            `INSERT INTO royalty_payouts (id, royalty_obligation_id, owner_id, amount, state)
+      );
+      for (const payout of payouts) {
+        await client.query(
+          `INSERT INTO royalty_payouts (id, royalty_obligation_id, owner_id, amount, state)
              VALUES ($1,$2,$3,$4,'PAID')`,
-            [uuidv4(), id, payout.ownerId, payout.amount.toString()]
-          );
-        }
-        await client.query('COMMIT');
-      } catch (err) {
-        await client.query('ROLLBACK');
-        throw err;
+          [uuidv4(), id, payout.ownerId, payout.amount.toString()]
+        );
       }
+      await client.query('COMMIT');
 
       return this.loadObligation(client, id);
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      throw err;
     } finally {
       client.release();
     }
   }
 
-  async releaseObligation(eventId: string, releaseIdempotencyKey: string): Promise<RoyaltyObligation> {
+  async releaseObligation(
+    organizationId: string,
+    eventId: string,
+    releaseIdempotencyKey: string
+  ): Promise<RoyaltyObligation> {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
       const result = await client.query(
-        `SELECT * FROM royalty_obligations WHERE event_id = $1 FOR UPDATE`,
-        [eventId]
+        `SELECT * FROM royalty_obligations
+         WHERE organization_id = $1 AND event_id = $2 FOR UPDATE`,
+        [organizationId, eventId]
       );
       if (result.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -143,8 +168,12 @@ export class RoyaltyService {
       }
       const row = result.rows[0];
 
-      if (row.status === RoyaltyStatus.POSTED) {
-        // Already released (or was never held) -- deterministic replay.
+      const existingRelease = await client.query(
+        `SELECT 1 FROM royalty_releases
+         WHERE organization_id=$1 AND royalty_obligation_id=$2`,
+        [organizationId, row.id]
+      );
+      if (existingRelease.rows.length > 0) {
         await client.query('COMMIT');
         return this.loadObligation(client, row.id);
       }
@@ -159,14 +188,26 @@ export class RoyaltyService {
       const ledgerTxn = await this.ledgerClient.postRelease({
         organizationId: row.organization_id,
         eventId: row.event_id,
+        correlationId: row.correlation_id,
         idempotencyKey: releaseIdempotencyKey,
         gross: new Decimal(row.amount),
         payouts: breakdown.payouts,
       });
 
       await client.query(
-        `UPDATE royalty_obligations SET status = 'POSTED', ledger_transaction_id = $2 WHERE id = $1`,
+        `UPDATE royalty_obligations
+         SET status = 'POSTED',
+             ledger_transaction_id = $2,
+             release_ledger_transaction_id = $2
+         WHERE id = $1`,
         [row.id, ledgerTxn.id]
+      );
+      await client.query(
+        `INSERT INTO royalty_releases
+          (id, organization_id, royalty_obligation_id, release_idempotency_key,
+           release_ledger_transaction_id)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [uuidv4(), organizationId, row.id, releaseIdempotencyKey, ledgerTxn.id]
       );
       for (const payout of breakdown.payouts) {
         await client.query(
@@ -187,6 +228,7 @@ export class RoyaltyService {
   }
 
   async reverseObligation(
+    organizationId: string,
     reversedEventId: string,
     reversalEventId: string,
     reversalIdempotencyKey: string,
@@ -197,8 +239,11 @@ export class RoyaltyService {
       await client.query('BEGIN');
 
       const existingReversal = await client.query(
-        `SELECT * FROM royalty_reversals WHERE reversal_idempotency_key = $1`,
-        [reversalIdempotencyKey]
+        `SELECT rr.*
+         FROM royalty_reversals rr
+         JOIN royalty_obligations ro ON ro.id = rr.reversed_obligation_id
+         WHERE ro.organization_id = $1 AND rr.reversal_idempotency_key = $2`,
+        [organizationId, reversalIdempotencyKey]
       );
       if (existingReversal.rows.length > 0) {
         const obligationRow = await client.query(
@@ -210,8 +255,9 @@ export class RoyaltyService {
       }
 
       const result = await client.query(
-        `SELECT * FROM royalty_obligations WHERE event_id = $1 FOR UPDATE`,
-        [reversedEventId]
+        `SELECT * FROM royalty_obligations
+         WHERE organization_id = $1 AND event_id = $2 FOR UPDATE`,
+        [organizationId, reversedEventId]
       );
       if (result.rows.length === 0) {
         await client.query('ROLLBACK');
@@ -223,25 +269,44 @@ export class RoyaltyService {
         await client.query('ROLLBACK');
         throw new RoyaltyInvalidStateError(`obligation ${reversedEventId} is already REVERSED`);
       }
-      if (!row.ledger_transaction_id) {
+      const ledgerTransactionIds = [
+        row.initial_ledger_transaction_id || row.ledger_transaction_id,
+        row.release_ledger_transaction_id,
+      ].filter((value, index, values) => value && values.indexOf(value) === index);
+      if (ledgerTransactionIds.length === 0) {
         await client.query('ROLLBACK');
         throw new RoyaltyInvalidStateError(
           `obligation ${reversedEventId} has no ledger transaction to reverse (status ${row.status})`
         );
       }
 
-      const reversalTxn = await this.ledgerClient.postReversal(
-        row.ledger_transaction_id,
-        row.organization_id,
-        reason
-      );
+      const reversalTransactionIds: string[] = [];
+      for (const [index, ledgerTransactionId] of ledgerTransactionIds.entries()) {
+        const reversalTxn = await this.ledgerClient.postReversal(
+          ledgerTransactionId,
+          row.organization_id,
+          reason,
+          `${reversalIdempotencyKey}:${index}`
+        );
+        reversalTransactionIds.push(reversalTxn.id);
+      }
 
       await client.query(`UPDATE royalty_obligations SET status = 'REVERSED' WHERE id = $1`, [row.id]);
       await client.query(
         `INSERT INTO royalty_reversals
-          (id, reversed_obligation_id, reversal_event_id, reversal_idempotency_key, reversal_ledger_transaction_id)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [uuidv4(), row.id, reversalEventId, reversalIdempotencyKey, reversalTxn.id]
+          (id, organization_id, reversed_obligation_id, reversal_event_id,
+           reversal_idempotency_key, reversal_ledger_transaction_id,
+           reversal_ledger_transaction_ids)
+         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+        [
+          uuidv4(),
+          organizationId,
+          row.id,
+          reversalEventId,
+          reversalIdempotencyKey,
+          reversalTransactionIds[0],
+          JSON.stringify(reversalTransactionIds),
+        ]
       );
       await client.query('COMMIT');
 
@@ -254,10 +319,17 @@ export class RoyaltyService {
     }
   }
 
-  async getObligationByEventId(eventId: string): Promise<RoyaltyObligation> {
+  async getObligationByEventId(
+    organizationId: string,
+    eventId: string
+  ): Promise<RoyaltyObligation> {
     const client = await this.pool.connect();
     try {
-      const result = await client.query(`SELECT id FROM royalty_obligations WHERE event_id = $1`, [eventId]);
+      const result = await client.query(
+        `SELECT id FROM royalty_obligations
+         WHERE organization_id = $1 AND event_id = $2`,
+        [organizationId, eventId]
+      );
       if (result.rows.length === 0) throw new RoyaltyObligationNotFoundError(eventId);
       return this.loadObligation(client, result.rows[0].id);
     } finally {

@@ -26,6 +26,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(__file__))
 from royalty_keys import generate_tenant_keypair  # noqa: E402
 from royalty_outbox_simulator import LyricaOutboxSimulator  # noqa: E402
+from royalty_signing_keys import InMemorySigningKeyProvider  # noqa: E402
 
 GATEWAY_DIR = Path(__file__).resolve().parent
 REPO_ROOT = GATEWAY_DIR.parent.parent
@@ -116,6 +117,8 @@ async def main():
 
         # --- OUTAGE: gateway is NOT running yet ---
         priv, pub = generate_tenant_keypair()
+        signing_key_ref = f"test://lyrica/{TENANT_ID}/lyr-k1"
+        signing_key_provider = InMemorySigningKeyProvider({signing_key_ref: priv})
         event = {
             "schema_version": "1.0", "event_id": f"evt_at12_{RUN_ID}", "event_type": "royalty.obligation.created",
             "occurred_at": datetime.now(timezone.utc).isoformat(), "correlation_id": f"corr_at12_{RUN_ID}",
@@ -128,8 +131,14 @@ async def main():
             "amount": {"currency": "USD", "value": "1.2500"},
         }
 
-        simulator = LyricaOutboxSimulator(pool, f"http://127.0.0.1:{GATEWAY_PORT}", TENANT_ID, "at12-tenant-token")
-        await simulator.enqueue(event, priv, "lyr-k1")
+        simulator = LyricaOutboxSimulator(
+            pool,
+            f"http://127.0.0.1:{GATEWAY_PORT}",
+            TENANT_ID,
+            "at12-tenant-token",
+            signing_key_provider,
+        )
+        await simulator.enqueue(event, signing_key_ref, "lyr-k1")
         print("Enqueued event while gateway is DOWN (outage simulated).")
 
         attempted = await simulator.run_once()
@@ -149,7 +158,13 @@ async def main():
 
         # --- Simulator "restart": fresh instance, same Postgres-backed state ---
         del simulator
-        simulator2 = LyricaOutboxSimulator(pool, f"http://127.0.0.1:{GATEWAY_PORT}", TENANT_ID, "at12-tenant-token")
+        simulator2 = LyricaOutboxSimulator(
+            pool,
+            f"http://127.0.0.1:{GATEWAY_PORT}",
+            TENANT_ID,
+            "at12-tenant-token",
+            signing_key_provider,
+        )
         await simulator2.run_until_all_settled(timeout_seconds=30.0)
 
         final_row = await pool.fetchrow("SELECT * FROM lyrica_outbox WHERE event_id=$1", event["event_id"])
@@ -169,8 +184,44 @@ async def main():
         receipt_payload = json.loads(final_row["receipt"])
         assert receipt_payload["status"] in ("processing", "paid")
 
+        # --- Multi-worker lease proof: two workers race one due row ---
+        worker_event = json.loads(json.dumps(event))
+        worker_event["event_id"] = f"evt_at12_workers_{RUN_ID}"
+        worker_event["idempotency_key"] = f"idem_at12_workers_{RUN_ID}"
+        worker_event["correlation_id"] = f"corr_at12_workers_{RUN_ID}"
+        worker_event["occurred_at"] = datetime.now(timezone.utc).isoformat()
+        await simulator2.enqueue(worker_event, signing_key_ref, "lyr-k1")
+
+        worker_a = LyricaOutboxSimulator(
+            pool,
+            f"http://127.0.0.1:{GATEWAY_PORT}",
+            TENANT_ID,
+            "at12-tenant-token",
+            signing_key_provider,
+            worker_id="at12-worker-a",
+        )
+        worker_b = LyricaOutboxSimulator(
+            pool,
+            f"http://127.0.0.1:{GATEWAY_PORT}",
+            TENANT_ID,
+            "at12-tenant-token",
+            signing_key_provider,
+            worker_id="at12-worker-b",
+        )
+        claimed_counts = await asyncio.gather(worker_a.run_once(), worker_b.run_once())
+        worker_row = await pool.fetchrow(
+            "SELECT * FROM lyrica_outbox WHERE event_id=$1", worker_event["event_id"]
+        )
+        worker_obligations = await pool.fetch(
+            "SELECT * FROM royalty_obligations WHERE event_id=$1", worker_event["event_id"]
+        )
+        assert sum(claimed_counts) == 1, f"two workers claimed one row: {claimed_counts}"
+        assert worker_row["state"] == "receipted" and worker_row["attempts"] == 1
+        assert len(worker_obligations) == 1
+
         print(f"\nAT-12 PASS: exactly 1 obligation row, 1 balanced ledger transaction ({debits}=={credits}), "
-              f"1 receipt, outbox state=receipted, no duplicates, {final_row['attempts']} total attempts.")
+              f"1 receipt, outbox state=receipted, no duplicates, {final_row['attempts']} total attempts; "
+              f"two-worker lease race claimed exactly once.")
         sys.exit(0)
     finally:
         if gateway_proc:

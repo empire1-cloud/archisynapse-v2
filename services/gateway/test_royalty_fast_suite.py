@@ -8,12 +8,21 @@ service to verify correctly.
 Run: pytest services/gateway/test_royalty_fast_suite.py
 """
 
+import asyncio
+
 import pytest
 from pydantic import ValidationError
 
 from royalty_events import RoyaltyObligationCreated
+from royalty_authz import (
+    AuthorizationDenied,
+    TestFixtureAuthorizationAdapter,
+    authorize_policy_action,
+)
+import royalty_authz
 from royalty_keys import generate_tenant_keypair, sign_with_private_key, verify_event_signature
 from royalty_tenant_resolver import IdentityTenantResolver
+from royalty_signing_keys import InMemorySigningKeyProvider, SigningKeyUnavailable
 
 
 def _valid_event_dict(**overrides):
@@ -103,3 +112,31 @@ def test_identity_tenant_resolver_is_passthrough():
     resolver = IdentityTenantResolver()
     assert resolver.resolve("lyrica") == "lyrica"
     assert resolver.resolve("mer_int_1234") == "mer_int_1234"
+
+
+def test_release_authorization_binds_role_and_persisted_tenant(monkeypatch):
+    adapter = TestFixtureAuthorizationAdapter()
+    adapter.register("good", "lyrica", "policy_admin")
+    adapter.register("wrong-role", "lyrica", "viewer")
+    adapter.register("wrong-tenant", "other", "policy_admin")
+    monkeypatch.setattr(royalty_authz, "authorization_adapter", adapter)
+
+    principal = asyncio.run(authorize_policy_action("good", "lyrica"))
+    assert principal.tenant_id == "lyrica"
+
+    for token, reason in (
+        (None, "missing_auth"),
+        ("unknown", "invalid_or_unknown_token"),
+        ("wrong-role", "wrong_role"),
+        ("wrong-tenant", "wrong_tenant"),
+    ):
+        with pytest.raises(AuthorizationDenied) as exc:
+            asyncio.run(authorize_policy_action(token, "lyrica"))
+        assert exc.value.reason == reason
+
+
+def test_outbox_signing_provider_uses_reference_not_database_key():
+    provider = InMemorySigningKeyProvider({"test://key": "private-material"})
+    assert asyncio.run(provider.resolve_private_key("test://key")) == "private-material"
+    with pytest.raises(SigningKeyUnavailable):
+        asyncio.run(provider.resolve_private_key("test://missing"))

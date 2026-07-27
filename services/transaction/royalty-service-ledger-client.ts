@@ -1,4 +1,5 @@
 import { Decimal } from 'decimal.js';
+import crypto from 'crypto';
 
 /**
  * Ledger HTTP client for the royalty domain. Separate from the
@@ -18,6 +19,18 @@ export class RoyaltyLedgerClient {
 
   constructor(baseUrl: string = process.env.LEDGER_SERVICE_URL || 'http://localhost:3001') {
     this.baseUrl = baseUrl;
+  }
+
+  private scopedIdempotencyKey(
+    organizationId: string,
+    operation: string,
+    idempotencyKey: string
+  ): string {
+    const digest = crypto
+      .createHash('sha256')
+      .update(`${organizationId}\u0000${operation}\u0000${idempotencyKey}`)
+      .digest('hex');
+    return `royalty:${operation}:${digest}`;
   }
 
   private async listAccounts(organizationId: string): Promise<Array<{ id: string; code: string }>> {
@@ -73,6 +86,7 @@ export class RoyaltyLedgerClient {
   async postAllow(params: {
     organizationId: string;
     eventId: string;
+    correlationId: string;
     idempotencyKey: string;
     gross: Decimal;
     payouts: Array<{ ownerId: string; amount: Decimal }>;
@@ -89,6 +103,7 @@ export class RoyaltyLedgerClient {
         debitCredit: 'DEBIT',
         amount: params.gross.toString(),
         description: `Royalty obligation ${params.eventId}`,
+        metadata: { correlationId: params.correlationId, royaltyEventId: params.eventId },
       },
     ];
     for (const payout of params.payouts) {
@@ -103,6 +118,7 @@ export class RoyaltyLedgerClient {
         debitCredit: 'CREDIT',
         amount: payout.amount.toString(),
         description: `Royalty payable to ${payout.ownerId} for ${params.eventId}`,
+        metadata: { correlationId: params.correlationId, royaltyEventId: params.eventId },
       });
     }
 
@@ -112,7 +128,16 @@ export class RoyaltyLedgerClient {
       description: `Royalty obligation ${params.eventId}`,
       amount: params.gross.toString(),
       currency: 'USD',
-      idempotencyKey: params.idempotencyKey,
+      idempotencyKey: this.scopedIdempotencyKey(
+        params.organizationId,
+        'allow',
+        params.idempotencyKey
+      ),
+      metadata: {
+        sourceIdempotencyKey: params.idempotencyKey,
+        royaltyEventId: params.eventId,
+        correlationId: params.correlationId,
+      },
       entries,
     });
   }
@@ -120,6 +145,7 @@ export class RoyaltyLedgerClient {
   async postHold(params: {
     organizationId: string;
     eventId: string;
+    correlationId: string;
     idempotencyKey: string;
     gross: Decimal;
   }): Promise<{ id: string }> {
@@ -142,19 +168,30 @@ export class RoyaltyLedgerClient {
       description: `Royalty obligation held: ${params.eventId}`,
       amount: params.gross.toString(),
       currency: 'USD',
-      idempotencyKey: params.idempotencyKey,
+      idempotencyKey: this.scopedIdempotencyKey(
+        params.organizationId,
+        'hold',
+        params.idempotencyKey
+      ),
+      metadata: {
+        sourceIdempotencyKey: params.idempotencyKey,
+        royaltyEventId: params.eventId,
+        correlationId: params.correlationId,
+      },
       entries: [
         {
           accountId: expenseAccountId,
           debitCredit: 'DEBIT',
           amount: params.gross.toString(),
           description: `Royalty obligation ${params.eventId} (held)`,
+          metadata: { correlationId: params.correlationId, royaltyEventId: params.eventId },
         },
         {
           accountId: heldAccountId,
           debitCredit: 'CREDIT',
           amount: params.gross.toString(),
           description: `Held pending risk review: ${params.eventId}`,
+          metadata: { correlationId: params.correlationId, royaltyEventId: params.eventId },
         },
       ],
     });
@@ -163,6 +200,7 @@ export class RoyaltyLedgerClient {
   async postRelease(params: {
     organizationId: string;
     eventId: string;
+    correlationId: string;
     idempotencyKey: string;
     gross: Decimal;
     payouts: Array<{ ownerId: string; amount: Decimal }>;
@@ -179,6 +217,7 @@ export class RoyaltyLedgerClient {
         debitCredit: 'DEBIT',
         amount: params.gross.toString(),
         description: `Release held royalty ${params.eventId}`,
+        metadata: { correlationId: params.correlationId, royaltyEventId: params.eventId },
       },
     ];
     for (const payout of params.payouts) {
@@ -193,6 +232,7 @@ export class RoyaltyLedgerClient {
         debitCredit: 'CREDIT',
         amount: payout.amount.toString(),
         description: `Royalty payable to ${payout.ownerId} for ${params.eventId} (released)`,
+        metadata: { correlationId: params.correlationId, royaltyEventId: params.eventId },
       });
     }
 
@@ -202,7 +242,16 @@ export class RoyaltyLedgerClient {
       description: `Release of held royalty ${params.eventId}`,
       amount: params.gross.toString(),
       currency: 'USD',
-      idempotencyKey: `${params.idempotencyKey}-release`,
+      idempotencyKey: this.scopedIdempotencyKey(
+        params.organizationId,
+        'release',
+        params.idempotencyKey
+      ),
+      metadata: {
+        sourceIdempotencyKey: params.idempotencyKey,
+        royaltyEventId: params.eventId,
+        correlationId: params.correlationId,
+      },
       entries,
     });
   }
@@ -210,12 +259,20 @@ export class RoyaltyLedgerClient {
   async postReversal(
     originalLedgerTransactionId: string,
     organizationId: string,
-    reason: string
+    reason: string,
+    reversalIdempotencyKey: string
   ): Promise<{ id: string }> {
     const res = await fetch(`${this.baseUrl}/transactions/${originalLedgerTransactionId}/reverse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Organization-ID': organizationId },
-      body: JSON.stringify({ reason }),
+      body: JSON.stringify({
+        reason,
+        idempotencyKey: this.scopedIdempotencyKey(
+          organizationId,
+          'reversal',
+          reversalIdempotencyKey
+        ),
+      }),
     });
     if (!res.ok) {
       throw new Error(`Ledger Service rejected reversal: ${res.status} ${await res.text()}`);
