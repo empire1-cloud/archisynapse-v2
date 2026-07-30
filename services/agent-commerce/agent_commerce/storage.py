@@ -101,6 +101,52 @@ CREATE TABLE IF NOT EXISTS agent_reputation (
     updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS service_contracts (
+    id TEXT PRIMARY KEY,
+    service_id TEXT NOT NULL,
+    service_version TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    provider_agent_npub TEXT NOT NULL,
+    specialty TEXT NOT NULL,
+    endpoint TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    settlement_policy TEXT NOT NULL,
+    max_price_sats INTEGER NOT NULL CHECK(max_price_sats >= 0),
+    response_deadline_ms INTEGER NOT NULL CHECK(response_deadline_ms > 0),
+    delivery_deadline_ms INTEGER NOT NULL CHECK(delivery_deadline_ms > 0),
+    availability_target_bps INTEGER NOT NULL CHECK(availability_target_bps BETWEEN 0 AND 10000),
+    min_quality_score REAL NOT NULL CHECK(min_quality_score >= 0 AND min_quality_score <= 1),
+    max_response_bytes INTEGER NOT NULL CHECK(max_response_bytes > 0),
+    max_retries INTEGER NOT NULL DEFAULT 0 CHECK(max_retries >= 0),
+    validator_required INTEGER NOT NULL DEFAULT 1 CHECK(validator_required IN (0,1)),
+    provider_self_verify_allowed INTEGER NOT NULL DEFAULT 0 CHECK(provider_self_verify_allowed IN (0,1)),
+    refund_on_failed_delivery INTEGER NOT NULL DEFAULT 1 CHECK(refund_on_failed_delivery IN (0,1)),
+    required_deliverables_json TEXT NOT NULL DEFAULT '[]',
+    required_evidence_json TEXT NOT NULL DEFAULT '[]',
+    expires_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(tenant_id, service_id, service_version, provider_agent_npub)
+);
+CREATE INDEX IF NOT EXISTS idx_service_contracts_tenant_status
+ON service_contracts(tenant_id, status);
+
+CREATE TABLE IF NOT EXISTS fable_receipts (
+    id TEXT PRIMARY KEY,
+    receipt_type TEXT NOT NULL,
+    contract_id TEXT REFERENCES service_contracts(id),
+    authorization_id TEXT,
+    execution_id TEXT,
+    payment_receipt_id TEXT,
+    payload_json TEXT NOT NULL,
+    receipt_sha256 TEXT NOT NULL UNIQUE,
+    signature TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fable_receipts_contract
+ON fable_receipts(contract_id, receipt_type);
+
 CREATE TABLE IF NOT EXISTS audit_events (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     event_id TEXT NOT NULL UNIQUE,
