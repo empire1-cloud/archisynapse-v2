@@ -3,15 +3,17 @@ name: Agent Commerce Gate
 on:
   push:
     branches:
-      - agent/agent-commerce-rail
+      - main
     paths:
       - "services/agent-commerce/**"
       - "docs/AGENT_COMMERCE_RAIL.md"
+      - "docs/AI_TOKEN_SPEND_CONTROLS.md"
       - ".github/workflows/agent-commerce-gate.yml"
   pull_request:
     paths:
       - "services/agent-commerce/**"
       - "docs/AGENT_COMMERCE_RAIL.md"
+      - "docs/AI_TOKEN_SPEND_CONTROLS.md"
       - ".github/workflows/agent-commerce-gate.yml"
 
 permissions:
@@ -32,4 +34,4 @@ jobs:
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -e '.[test]'
       - run: python -m compileall -q agent_commerce
-      - run: pytest
+      - run: pytest -q
