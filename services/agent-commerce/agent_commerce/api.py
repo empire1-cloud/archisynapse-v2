@@ -12,7 +12,7 @@ from .authorization import AuthorizationStore
 from .contracts import ServiceContractStore
 from .errors import AgentCommerceError
 from .fable import FableReceiptStore
-from .identity import AgentProfileSigner
+from .identity import AgentProfileSigner, validate_public_endpoint
 from .l402 import AgentCommerceService, LndRestPaymentProvider
 from .receipts import ReceiptSigner, ReceiptStore
 from .recovery import reconcile_initiated_payment
@@ -288,6 +288,10 @@ def get_service_template(template_id: str):
 )
 def create_service_contract(request: ServiceContractCreate):
     payload = request.model_dump(exclude={"template_id"})
+    payload["endpoint"] = validate_public_endpoint(
+        request.endpoint,
+        production=os.getenv("NODE_ENV", "development") == "production",
+    )
     contract = CONTRACTS.create(**payload)
     contract_payload = contract.to_dict()
     fable_receipt = FABLE_RECEIPTS.issue_contract_receipt(contract_payload)
@@ -432,44 +436,51 @@ def get_fable_receipt(receipt_id: str):
 )
 def record_outcome(receipt_id: str, request: OutcomeRequest):
     outcome_payload = request.model_dump(exclude={"service_contract_id"})
+
+    if not request.service_contract_id:
+        return REPUTATION.record_verified_outcome(
+            receipt_id=receipt_id,
+            **outcome_payload,
+        )
+
+    contract = CONTRACTS.get(request.service_contract_id)
+    if not contract:
+        raise HTTPException(status_code=404, detail="service contract not found")
+    payment_receipt = RECEIPTS.get(receipt_id)
+    if not payment_receipt:
+        raise HTTPException(status_code=404, detail="payment receipt not found")
+    payment_payload = payment_receipt.to_dict()
+    delivery_receipt = FABLE_RECEIPTS.find_delivery_verdict(
+        contract_id=contract.id,
+        payment_receipt_id=receipt_id,
+    )
+    prior_evaluation = CONTRACTS.validate_receipt_binding(
+        contract,
+        payment_receipt=payment_payload,
+        delivery_receipt=delivery_receipt,
+    )
+    final_result = CONTRACTS.evaluate_validator_outcome(
+        contract,
+        outcome=outcome_payload,
+        delivery_verdict=prior_evaluation,
+    )
+
     reputation = REPUTATION.record_verified_outcome(
         receipt_id=receipt_id,
         **outcome_payload,
     )
-    response: dict[str, Any] = {"reputation": reputation}
-
-    if request.service_contract_id:
-        contract = CONTRACTS.get(request.service_contract_id)
-        if not contract:
-            raise HTTPException(status_code=404, detail="service contract not found")
-        payment_receipt = RECEIPTS.get(receipt_id)
-        if not payment_receipt:
-            raise HTTPException(status_code=404, detail="payment receipt not found")
-        payment_payload = payment_receipt.to_dict()
-        delivery_receipt = FABLE_RECEIPTS.find_delivery_verdict(
-            contract_id=contract.id,
-            payment_receipt_id=receipt_id,
-        )
-        prior_evaluation = (
-            delivery_receipt.get("body", {}).get("sla_evaluation")
-            if delivery_receipt
-            else None
-        )
-        final_result = CONTRACTS.evaluate_validator_outcome(
-            contract,
-            outcome=outcome_payload,
-            delivery_verdict=prior_evaluation,
-        )
-        final_receipt = FABLE_RECEIPTS.issue_final_sla_verdict(
-            contract=contract.to_dict(),
-            authorization_id=payment_payload["authorization_id"],
-            execution_id=payment_payload["orchestration_id"],
-            payment_receipt_id=receipt_id,
-            result=final_result,
-        )
-        response["sla"] = final_result
-        response["fable_final_receipt"] = final_receipt
-    return response
+    final_receipt = FABLE_RECEIPTS.issue_final_sla_verdict(
+        contract=contract.to_dict(),
+        authorization_id=payment_payload["authorization_id"],
+        execution_id=payment_payload["orchestration_id"],
+        payment_receipt_id=receipt_id,
+        result=final_result,
+    )
+    return {
+        "reputation": reputation,
+        "sla": final_result,
+        "fable_final_receipt": final_receipt,
+    }
 
 
 @app.get(
