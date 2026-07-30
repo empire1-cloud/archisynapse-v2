@@ -50,3 +50,19 @@ class ReceiptIntegrityError(AgentCommerceError):
 
 class IdentityConfigurationError(AgentCommerceError):
     code = "identity_configuration_error"
+
+
+class RateCardNotFound(AgentCommerceError):
+    code = "rate_card_not_found"
+
+
+class PolicyPaused(AuthorizationDenied):
+    code = "ai_spend_policy_paused"
+
+
+class ModelRouteDenied(AuthorizationDenied):
+    code = "model_route_denied"
+
+
+class UsageReconciliationError(AgentCommerceError):
+    code = "usage_reconciliation_error"
