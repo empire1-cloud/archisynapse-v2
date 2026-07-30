@@ -8,12 +8,14 @@ on:
       - "services/agent-commerce/**"
       - "docs/AGENT_COMMERCE_RAIL.md"
       - "docs/AI_TOKEN_SPEND_CONTROLS.md"
+      - "docs/AGENT_SERVICE_CONTRACTS.md"
       - ".github/workflows/agent-commerce-gate.yml"
   pull_request:
     paths:
       - "services/agent-commerce/**"
       - "docs/AGENT_COMMERCE_RAIL.md"
       - "docs/AI_TOKEN_SPEND_CONTROLS.md"
+      - "docs/AGENT_SERVICE_CONTRACTS.md"
       - ".github/workflows/agent-commerce-gate.yml"
 
 permissions:
