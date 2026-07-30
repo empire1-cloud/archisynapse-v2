@@ -11,6 +11,11 @@ from .models import iso_now
 from .storage import Database
 
 
+RUNTIME_INITIAL_TIMEOUT_MS = 10_000
+RUNTIME_DELIVERY_TIMEOUT_MS = 90_000
+RUNTIME_MAX_RESPONSE_BYTES = 1_000_000
+
+
 SETTLEMENT_POLICIES = {
     "prepaid_l402",
     "after_verified_delivery",
@@ -40,7 +45,7 @@ SERVICE_TEMPLATES: dict[str, dict[str, Any]] = {
         "delivery_deadline_ms": 900_000,
         "availability_target_bps": 9950,
         "min_quality_score": 0.80,
-        "max_response_bytes": 2_000_000,
+        "max_response_bytes": RUNTIME_MAX_RESPONSE_BYTES,
         "validator_required": True,
         "provider_self_verify_allowed": False,
         "refund_on_failed_delivery": True,
@@ -68,7 +73,7 @@ SERVICE_TEMPLATES: dict[str, dict[str, Any]] = {
         "delivery_deadline_ms": 600_000,
         "availability_target_bps": 9990,
         "min_quality_score": 0.90,
-        "max_response_bytes": 2_000_000,
+        "max_response_bytes": RUNTIME_MAX_RESPONSE_BYTES,
         "validator_required": True,
         "provider_self_verify_allowed": False,
         "refund_on_failed_delivery": True,
@@ -96,7 +101,7 @@ SERVICE_TEMPLATES: dict[str, dict[str, Any]] = {
         "delivery_deadline_ms": 900_000,
         "availability_target_bps": 9950,
         "min_quality_score": 0.80,
-        "max_response_bytes": 2_000_000,
+        "max_response_bytes": RUNTIME_MAX_RESPONSE_BYTES,
         "validator_required": True,
         "provider_self_verify_allowed": False,
         "refund_on_failed_delivery": True,
@@ -245,16 +250,24 @@ class ServiceContractStore:
             raise ServiceContractViolation("max_price_sats cannot be negative")
         if settlement_policy == "prepaid_l402" and max_price_sats <= 0:
             raise ServiceContractViolation("prepaid L402 contracts require a positive price ceiling")
-        if response_deadline_ms <= 0 or delivery_deadline_ms <= 0:
-            raise ServiceContractViolation("SLA deadlines must be positive")
+        if response_deadline_ms < RUNTIME_INITIAL_TIMEOUT_MS:
+            raise ServiceContractViolation(
+                "response deadline is below the current execution adapter minimum"
+            )
+        if delivery_deadline_ms < RUNTIME_DELIVERY_TIMEOUT_MS:
+            raise ServiceContractViolation(
+                "delivery deadline is below the current execution adapter minimum"
+            )
         if response_deadline_ms > delivery_deadline_ms:
             raise ServiceContractViolation("response deadline cannot exceed delivery deadline")
         if not 0 <= availability_target_bps <= 10_000:
             raise ServiceContractViolation("availability target must be 0-10000 basis points")
         if not 0 <= min_quality_score <= 1:
             raise ServiceContractViolation("minimum quality score must be 0-1")
-        if max_response_bytes <= 0:
-            raise ServiceContractViolation("max_response_bytes must be positive")
+        if not 0 < max_response_bytes <= RUNTIME_MAX_RESPONSE_BYTES:
+            raise ServiceContractViolation(
+                "max_response_bytes exceeds the current execution adapter ceiling"
+            )
         if max_retries < 0:
             raise ServiceContractViolation("max_retries cannot be negative")
         deliverables = sorted(set(item.strip() for item in required_deliverables if item.strip()))
@@ -459,6 +472,53 @@ class ServiceContractStore:
             ),
         }
 
+    def validate_receipt_binding(
+        self,
+        contract: ServiceContract,
+        *,
+        payment_receipt: dict[str, Any],
+        delivery_receipt: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if payment_receipt.get("tenant_id") != contract.tenant_id:
+            raise ServiceContractViolation(
+                "payment receipt tenant does not match the service contract"
+            )
+        if payment_receipt.get("agent_npub") != contract.provider_agent_npub:
+            raise ServiceContractViolation(
+                "payment receipt provider does not match the service contract"
+            )
+        if payment_receipt.get("specialty") != contract.specialty:
+            raise ServiceContractViolation(
+                "payment receipt specialty does not match the service contract"
+            )
+        if payment_receipt.get("endpoint") != contract.endpoint:
+            raise ServiceContractViolation(
+                "payment receipt endpoint does not match the service contract"
+            )
+        if not delivery_receipt:
+            raise ServiceContractViolation(
+                "contracted delivery is missing its FABLE delivery receipt"
+            )
+        if delivery_receipt.get("contract_id") != contract.id:
+            raise ServiceContractViolation(
+                "FABLE delivery receipt contract does not match"
+            )
+        if delivery_receipt.get("payment_receipt_id") != payment_receipt.get("id"):
+            raise ServiceContractViolation(
+                "FABLE delivery receipt does not bind this payment receipt"
+            )
+        body = delivery_receipt.get("body") or {}
+        if body.get("payment_receipt_sha256") != payment_receipt.get("receipt_sha256"):
+            raise ServiceContractViolation(
+                "FABLE delivery receipt payment hash does not match"
+            )
+        evaluation = body.get("sla_evaluation")
+        if not isinstance(evaluation, dict):
+            raise ServiceContractViolation(
+                "FABLE delivery receipt is missing its SLA evaluation"
+            )
+        return evaluation
+
     def evaluate_validator_outcome(
         self,
         contract: ServiceContract,
@@ -466,15 +526,24 @@ class ServiceContractStore:
         outcome: dict[str, Any],
         delivery_verdict: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        blockers = list((delivery_verdict or {}).get("blockers") or [])
+        if delivery_verdict is None:
+            raise ServiceContractViolation(
+                "final SLA validation requires a FABLE delivery verdict"
+            )
+        blockers = list(delivery_verdict.get("blockers") or [])
         quality_score = float(outcome["quality_score"])
         if not bool(outcome["success"]):
             blockers.append("independent validator marked the delivery unsuccessful")
         if quality_score < contract.min_quality_score:
             blockers.append("quality score is below the contract minimum")
         validator_id = str(outcome["validator_id"])
-        if not contract.provider_self_verify_allowed and validator_id == contract.provider_agent_npub:
-            blockers.append("provider cannot independently validate its own delivery")
+        if (
+            not contract.provider_self_verify_allowed
+            and validator_id == contract.provider_agent_npub
+        ):
+            raise ServiceContractViolation(
+                "provider cannot independently validate its own delivery"
+            )
         return {
             "contract_id": contract.id,
             "service_id": contract.service_id,
