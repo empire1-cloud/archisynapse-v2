@@ -40,7 +40,8 @@ export interface Payment {
   paymentMethod: PaymentMethod;
   description?: string;
   idempotencyKey: string;
-  ledgerTransactionId?: string;    // Set once posted to the Ledger Service
+  processorTransactionId?: string;
+  ledgerTransactionId?: string; // Set once posted to the Ledger Service
   failureReason?: string;
   metadata?: Record<string, unknown>;
   createdAt: Date;
@@ -61,7 +62,7 @@ export interface CreatePaymentRequest {
 
 export interface RefundRequest {
   paymentId: string;
-  amount?: Decimal;  // Partial refund if specified; full refund otherwise
+  amount?: Decimal; // Partial refund if specified; full refund otherwise
   reason: string;
   idempotencyKey: string;
 }
@@ -73,13 +74,13 @@ export interface Refund {
   amount: Decimal;
   reason: string;
   status: 'SUCCEEDED' | 'FAILED';
+  processorRefundId?: string;
   ledgerTransactionId?: string;
   createdAt: Date;
 }
 
 /**
- * Result of calling out to a payment processor (Stripe-like gateway).
- * This is an abstraction — swap in a real processor adapter later.
+ * Result returned to the transaction service after a processor charge attempt.
  */
 export interface ProcessorResult {
   success: boolean;
