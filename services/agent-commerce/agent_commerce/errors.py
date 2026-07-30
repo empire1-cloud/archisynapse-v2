@@ -66,3 +66,11 @@ class ModelRouteDenied(AuthorizationDenied):
 
 class UsageReconciliationError(AgentCommerceError):
     code = "usage_reconciliation_error"
+
+
+class ServiceContractViolation(AgentCommerceError):
+    code = "service_contract_violation"
+
+
+class ServiceContractNotFound(ServiceContractViolation):
+    code = "service_contract_not_found"
