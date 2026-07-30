@@ -159,3 +159,20 @@ def test_fable_receipts_are_signed_idempotent_and_audited(stores):
     assert signer.verify(authority)
     assert authority["body"]["query_sha256"] == hashlib.sha256(b"audit SEO").hexdigest()
     assert "audit SEO" not in json.dumps(authority)
+
+
+def test_provider_cannot_self_validate(stores):
+    _, contracts, _, _ = stores
+    contract = create_contract(contracts)
+    with pytest.raises(ServiceContractViolation):
+        contracts.evaluate_validator_outcome(
+            contract,
+            outcome={
+                "validator_id": contract.provider_agent_npub,
+                "success": True,
+                "quality_score": 1.0,
+                "latency_ms": 100,
+                "evidence_sha256": "e" * 64,
+            },
+            delivery_verdict={"blockers": []},
+        )
