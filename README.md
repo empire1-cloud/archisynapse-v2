@@ -20,6 +20,7 @@ The repository contains separate services for:
 - a disabled-by-default external processor boundary
 - signed payment and royalty receipts
 - idempotency and recovery paths
+- an audited merchant access lifecycle operator
 
 The payment flow is:
 
@@ -48,7 +49,7 @@ The transaction service is the only service allowed to create financial ledger p
 | Fraud service | Implemented as a risk service | Do not claim a detection rate until measured with a documented dataset |
 | Analytics service | Implemented | Validate reports against production-like transaction data |
 | API gateway | Authenticated production entrypoint implemented | Run the full Docker boundary suite in CI |
-| Merchant authentication | Implemented | Add API-key rotation and merchant suspension endpoints |
+| Merchant authentication | Implemented with audited key rotation, revocation, suspension, and safe resumption through the operator tool | Expose the lifecycle through a protected admin API and prove it against the deployment database before production |
 | Internal service credentials | Encrypted in PostgreSQL | Move the encryption key into a managed secret service before production |
 | Durable idempotency | Implemented with request-hash conflict checks | PostgreSQL concurrency proof runs in CI |
 | Durable payment receipts | Stored in PostgreSQL with optional Ed25519 proofs | Configure a deployment signing key and publish key-rotation rules |
@@ -124,6 +125,7 @@ Read:
 
 - [`docs/GATEWAY_SETUP.md`](docs/GATEWAY_SETUP.md)
 - [`docs/PROCESSOR_PROOF.md`](docs/PROCESSOR_PROOF.md)
+- [`tools/merchant-admin/README.md`](tools/merchant-admin/README.md)
 
 ## Safety rules
 
@@ -146,7 +148,7 @@ Read:
 1. Run the approved processor sandbox proof with a founder-controlled test account.
 2. Add automated recovery for processor-refunded payments awaiting ledger reversal.
 3. Move the remaining gateway recovery queues from local files to PostgreSQL.
-4. Add merchant API-key rotation, revocation, and suspension.
+4. Expose the merged merchant lifecycle operator through a protected admin API and verify it against the deployment database.
 5. Add a full Docker test proving charge, ledger balance, signed receipt, refund, and reversal.
 6. Add an outside pilot that uses Archisynapse without depending on Lyrica.
 7. Run measured load tests before publishing any performance numbers.
