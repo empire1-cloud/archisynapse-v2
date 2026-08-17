@@ -456,11 +456,12 @@ async def refund_payment(payment_id: str, request: RefundRequest):
     }
 
 
-@app.post("/admin/recovery/replay")
-async def replay_recovery():
-    """Replay pending ledger/analytics recovery items."""
+@app.post("/admin/recovery/replay-legacy")
+async def replay_recovery_legacy():
+    """Compatibility alias; replays both financial recovery and Economic Truth outbox."""
     result = await orchestrator.replay_pending_recoveries(merchant_credentials_store)
-    return {"replayed": result}
+    truth = await flush_economic_truth_outbox()
+    return {"replayed": result, "economic_truth": truth}
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
