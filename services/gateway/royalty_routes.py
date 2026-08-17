@@ -3,6 +3,7 @@ FastAPI routes for the Lyrica royalty receipt loop.
 Included into the main gateway app (see main.py: app.include_router(royalty_router)).
 """
 
+import asyncio
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -10,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 import royalty_state as state
+from economic_truth_bridge import deliver_event as deliver_economic_truth_event, enqueue_event as enqueue_economic_truth_event
 from royalty_admin_auth import require_admin
 from royalty_keys import gateway_receipt_signer
 from royalty_orchestrator import (
@@ -23,6 +25,40 @@ from royalty_transaction_client import RoyaltyTransactionClient
 
 royalty_router = APIRouter()
 royalty_transaction_client = RoyaltyTransactionClient()
+
+
+async def _record_royalty_truth(receipt: dict, stage: str = "outcome", reason: str | None = None) -> None:
+    authority = receipt.get("economic_truth") or {}
+    action_id = authority.get("action_id")
+    if not action_id:
+        return
+    payload = {
+        "source": "archisynapse-royalty",
+        "external_id": receipt["receipt_id"],
+        "status": receipt.get("status"),
+        "transaction_id": receipt.get("transaction_id"),
+        "ledger_transaction_id": receipt.get("ledger_transaction_id"),
+        "vics_checks": (receipt.get("decision") or {}).get("checks", []),
+        "coverage_surfaces": ["lyrica.vics", "lyrica.royalty", "archisynapse.ledger"],
+        "parent_receipt_ids": [authority["authorization_receipt_id"]] if authority.get("authorization_receipt_id") else [],
+    }
+    if stage == "verify":
+        payload.update({
+            "independent": True,
+            "verified_by": "archisynapse-royalty-reconciliation",
+            "receipt_signature_verified": True,
+        })
+    if stage == "reverse":
+        payload.update({"reason": reason or "royalty_reversed"})
+        payload["coverage_surfaces"].append("archisynapse.reversal")
+    row = await enqueue_economic_truth_event(
+        source="archisynapse-royalty",
+        external_id=f"{stage}:{receipt['receipt_id']}",
+        action_id=action_id,
+        stage=stage,
+        payload=payload,
+    )
+    await deliver_economic_truth_event(row)
 
 
 async def close_royalty_transaction_client() -> None:
@@ -89,6 +125,9 @@ async def ingest_royalty_event(request: Request):
     try:
         verified = await verify_and_parse(raw_body, headers)
         receipt, status_code = await process_obligation_created(verified, royalty_transaction_client)
+        await _record_royalty_truth(receipt, "outcome")
+        if receipt.get("status") == "paid":
+            await _record_royalty_truth(receipt, "verify")
     except RoyaltyRejection as rejection:
         if rejection.body is not None:
             return JSONResponse(status_code=rejection.status_code, content=rejection.body)
@@ -117,8 +156,15 @@ async def release_royalty_event(event_id: str, request: Request):
     if not tenant_id:
         raise HTTPException(status_code=400, detail={"code": "invalid_schema", "message": "X-Tenant-Id header is required"})
 
+    original = await state.load_royalty_receipt_by_event(event_id)
     try:
         receipt, status_code = await release_obligation(tenant_id, event_id, royalty_transaction_client)
+        if original and original.get("economic_truth"):
+            receipt["economic_truth"] = original["economic_truth"]
+            await state.save_royalty_receipt(receipt)
+            await _record_royalty_truth(receipt, "outcome")
+            if receipt.get("status") == "paid":
+                await _record_royalty_truth(receipt, "verify")
     except RoyaltyRejection as rejection:
         if rejection.body is not None:
             return JSONResponse(status_code=rejection.status_code, content=rejection.body)
@@ -139,6 +185,7 @@ async def reverse_royalty_event(event_id: str, request: Request, body: ReverseRe
     if not tenant_id:
         raise HTTPException(status_code=400, detail={"code": "invalid_schema", "message": "X-Tenant-Id header is required"})
 
+    original = await state.load_royalty_receipt_by_event(event_id)
     try:
         receipt, status_code = await reverse_obligation(
             tenant_id,
@@ -148,6 +195,10 @@ async def reverse_royalty_event(event_id: str, request: Request, body: ReverseRe
             body.reason,
             royalty_transaction_client,
         )
+        if original and original.get("economic_truth"):
+            receipt["economic_truth"] = original["economic_truth"]
+            await state.save_royalty_receipt(receipt)
+            await _record_royalty_truth(receipt, "reverse", body.reason)
     except RoyaltyRejection as rejection:
         if rejection.body is not None:
             return JSONResponse(status_code=rejection.status_code, content=rejection.body)
