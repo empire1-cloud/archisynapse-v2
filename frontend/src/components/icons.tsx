@@ -47,6 +47,24 @@ export function ShieldIcon({ className }: IconProps) {
   );
 }
 
+export function BoltIcon({ className }: IconProps) {
+  return (
+    <svg className={className} {...base}>
+      <path d="M13 2 4 14h6l-1 8 9-12h-6l1-8z" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function CoinIcon({ className }: IconProps) {
+  return (
+    <svg className={className} {...base}>
+      <ellipse cx="12" cy="7" rx="7" ry="3.2" />
+      <path d="M5 7v5c0 1.8 3.1 3.2 7 3.2s7-1.4 7-3.2V7" />
+      <path d="M5 12v5c0 1.8 3.1 3.2 7 3.2s7-1.4 7-3.2v-5" />
+    </svg>
+  );
+}
+
 export function OutboxIcon({ className }: IconProps) {
   return (
     <svg className={className} {...base}>

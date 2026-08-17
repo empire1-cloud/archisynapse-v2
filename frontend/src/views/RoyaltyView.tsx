@@ -13,7 +13,7 @@ const STATUS_PILL: Record<string, string> = {
   rejected: 'pill-danger',
 };
 
-export function RoyaltyView() {
+export function RoyaltyView({ focusId }: { focusId?: string | null }) {
   const [events, setEvents] = useState<RoyaltyObligationCreated[]>([]);
   const [receipts, setReceipts] = useState<UnifiedReceipt[]>([]);
   const [source, setSource] = useState<DataSourceMode>('mock');
@@ -35,6 +35,11 @@ export function RoyaltyView() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!focusId || events.length === 0) return;
+    if (events.some((e) => e.event_id === focusId)) setSelected(focusId);
+  }, [focusId, events]);
 
   if (loading) return <div className="empty-hint">Loading royalty obligations…</div>;
 

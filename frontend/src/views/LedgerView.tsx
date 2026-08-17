@@ -11,7 +11,7 @@ const STATUS_PILL: Record<Transaction['status'], string> = {
   REVERSED: 'pill-neutral',
 };
 
-export function LedgerView() {
+export function LedgerView({ focusId }: { focusId?: string | null }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [accountsSource, setAccountsSource] = useState<DataSourceMode>('mock');
   const [txns, setTxns] = useState<Transaction[]>([]);
@@ -35,6 +35,12 @@ export function LedgerView() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!focusId || txns.length === 0) return;
+    const match = txns.find((t) => t.id === focusId);
+    if (match) setSelected(match);
+  }, [focusId, txns]);
 
   const accountName = useMemo(() => {
     const map = new Map(accounts.map((a) => [a.id, a]));

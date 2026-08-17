@@ -13,7 +13,7 @@ const STATUS_PILL: Record<string, string> = {
   rejected: 'pill-danger',
 };
 
-export function ReceiptsView() {
+export function ReceiptsView({ focusId }: { focusId?: string | null }) {
   const [receipts, setReceipts] = useState<UnifiedReceipt[]>([]);
   const [source, setSource] = useState<DataSourceMode>('mock');
   const [selected, setSelected] = useState<string | null>(null);
@@ -33,6 +33,12 @@ export function ReceiptsView() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!focusId || receipts.length === 0) return;
+    const match = receipts.find((r) => r.receipt_id === focusId || r.event_id === focusId);
+    if (match) setSelected(match.receipt_id);
+  }, [focusId, receipts]);
 
   if (loading) return <div className="empty-hint">Loading signed receipts…</div>;
 

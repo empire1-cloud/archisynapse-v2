@@ -45,22 +45,54 @@ machine. The Outbox view's retry legend (409 `processing` = retryable, 409
 `idempotency_conflict` = terminal) is pulled directly from the comments and
 logic in `royalty_outbox_simulator.py`, not guessed.
 
+## Visual direction (v2 — superseded the first restrained draft)
+
+The first pass used an obsidian + deep-gold, deliberately quiet palette,
+matching the "not a hype dashboard" framing in the original brief. Direct
+feedback overrode that: this should feel high-tech and alive, closer to the
+Archisynapse Sovereign Core reference images (bright cyan/teal glow,
+glassmorphic cards, energy-line connections between draggable elements) —
+not a flat SaaS admin template.
+
+The console now runs on that direction: obsidian base, cyan-teal glow accent
+(`--accent` in `src/index.css`, one variable), a purple secondary
+(`--accent2`) for branch/alternate paths, a faint animated grid + radial glow
+background, glass panels, and glowing pills/borders throughout. A new **Flow**
+view is the default landing screen — a draggable node canvas connected by
+animated glowing lines, tracing one real obligation through
+risk → ledger → signed receipt → payout. It's real data (same mock/live
+records as the table views), and the nodes are actually draggable — verified
+by dispatching pointer events and confirming position state changes, not
+just eyeballing it.
+
+There's also a command bar at the bottom of every view (styled like the
+`Command the Sovereign Core…` bar from the SLA113 reference). It's real
+navigation, not a chat AI — type a view name (`ledger`, `risk`, `outbox`…) or
+a record id (`evt_…`, `txn_…`, `rcp_…`) and it jumps you there, confirmed by
+scripted keyboard-event tests. I did not wire it to an actual LLM/agent
+backend since no such endpoint was specified — faking an "AI" response would
+misrepresent what's live, which the hard rules here are explicit about.
+
 ## Decisions for Manda to weigh in on
 
-1. **Palette.** Obsidian base + deep gold accent (`#c9a24d`) is the starting
-   point from your canon, deliberately not neon-blue. All accent usage is a
-   single CSS variable (`--accent` in `src/index.css`) — a one-line change
-   swaps it (e.g. to a deep teal) to A/B the feel.
-2. **Which view is "home."** Ledger is first in the nav today because it's
-   the most foundational (money in/out). Royalty Splits or Receipts might be
-   a better landing view if the primary audience is creators/tenants rather
-   than internal finance ops.
-3. **Missing list endpoints.** The journal, receipts, and royalty views can't
+1. **How far to push the glow.** Current balance leans toward the reference
+   images but keeps real financial data in tables (not floating nodes) for
+   auditability — double-entry entries and signed receipts need to be
+   scannable and diffable, which a pure node canvas doesn't give you. Flow
+   is additive, not a replacement. Worth checking this split feels right.
+2. **The command bar's real backend.** Right now it's real but narrow (view
+   navigation + record lookup, all client-side). If there's an actual chat
+   agent in the ecosystem this should proxy to, point me at it and I'll wire
+   it for real rather than building another mock.
+3. **Which view is "home."** Flow is first/default now since it's the most
+   distinctive; Ledger might still be the better default for finance-ops
+   daily use once there's more than a demo dataset behind it.
+4. **Missing list endpoints.** The journal, receipts, and royalty views can't
    go fully live without `GET /transactions` and `GET /api/v1/receipts`
    (list) on the real services. Worth prioritizing if "see live data" is the
    next milestone — I did not add these to the backend since that's outside
    an additive-frontend-only change.
-4. **Tenant switching.** Right now the console is hardcoded to one demo
+5. **Tenant switching.** Right now the console is hardcoded to one demo
    tenant (`lyrica-music-group`). A real console needs a tenant/org switcher
    once there's more than one to look at.
 
