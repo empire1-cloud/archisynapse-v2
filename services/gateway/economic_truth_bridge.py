@@ -55,6 +55,12 @@ async def enqueue_event(
     return dict(row)
 
 
+def _payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, str):
+        return json.loads(value)
+    return dict(value or {})
+
+
 async def deliver_event(row: dict[str, Any], transport=None) -> dict[str, Any]:
     api_url = os.getenv("ECONOMIC_TRUTH_API_URL", "").rstrip("/")
     api_key = os.getenv("ECONOMIC_TRUTH_INGEST_KEY", "")
@@ -66,6 +72,7 @@ async def deliver_event(row: dict[str, Any], transport=None) -> dict[str, Any]:
         "reverse": f"/api/economic-truth/actions/{row['action_id']}/reverse",
     }[row["stage"]]
     pool = get_pool()
+    payload = _payload(row["payload"])
     await pool.execute(
         "UPDATE economic_truth_outbox SET state='sending', attempts=attempts+1, updated_at=now() WHERE id=$1",
         row["id"],
@@ -76,13 +83,22 @@ async def deliver_event(row: dict[str, Any], transport=None) -> dict[str, Any]:
                 response = await client.post(
                     f"{api_url}{path}",
                     headers={"x-economic-truth-key": api_key},
-                    json=dict(row["payload"]),
+                    json=payload,
                 )
         else:
-            response = await transport(f"{api_url}{path}", dict(row["payload"]))
+            response = await transport(f"{api_url}{path}", payload)
         if response.status_code >= 400:
             raise RuntimeError(f"Economic Truth HTTP {response.status_code}: {response.text[:300]}")
         body = response.json()
+        for surface_id in payload.get("coverage_surfaces", []):
+            heartbeat_path = f"{api_url}/api/economic-truth/coverage/heartbeat"
+            heartbeat_body = {"surface_id": surface_id, "healthy": True, "detail": {"action_id": row["action_id"], "external_id": row["external_id"]}}
+            if transport is None:
+                heartbeat_response = await client.post(heartbeat_path, headers={"x-economic-truth-key": api_key}, json=heartbeat_body)
+            else:
+                heartbeat_response = await transport(heartbeat_path, heartbeat_body)
+            if heartbeat_response.status_code >= 400:
+                raise RuntimeError(f"Economic Truth heartbeat HTTP {heartbeat_response.status_code}")
         await pool.execute(
             """UPDATE economic_truth_outbox
                SET state='delivered', response=$2::jsonb, last_error=NULL, updated_at=now()
