@@ -31,6 +31,7 @@ Archisynapse is a next-generation payment infrastructure platform that delivers:
 | Fraud | 🔜 Next | ML-powered fraud detection |
 | Analytics | 🔜 Next | Revenue intelligence |
 | Compliance | 🔜 Next | Auto-reporting (PCI, SOC 2) |
+| Frontend | 🟡 First draft | Ledger / receipts console — see [`frontend/`](frontend/) |
 
 ## Quick Start
 
@@ -46,6 +47,19 @@ cd services/ledger && npm install
 npm run dev  # Transaction on :3000
 npm run dev  # Ledger on :3001
 ```
+
+### Frontend (ledger / receipts console — first draft)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Runs standalone against typed mock data if no backend is reachable (clearly
+labeled in the UI); wires live to `ledger-service` / `gateway` automatically
+once they're up. See [`frontend/FRONTEND_NOTES.md`](frontend/FRONTEND_NOTES.md)
+for what's live vs. mocked today and open design decisions.
 
 ## Revenue Model
 

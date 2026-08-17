@@ -1,0 +1,3 @@
+/* Intentionally empty — all styling lives in index.css as design tokens +
+   shared component classes. Kept as a file so future view-specific overrides
+   have an obvious home without touching the token sheet. */
