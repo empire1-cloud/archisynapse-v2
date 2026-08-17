@@ -326,6 +326,15 @@ async def process_payment(request: ProcessPaymentRequest):
                 "ledger_transaction_id": receipt.ledger_transaction_id,
                 "analytics_recorded": receipt.analytics_recorded,
                 "status": receipt.status,
+                "coverage_surfaces": [
+                    "archisynapse.payment",
+                    "archisynapse.ledger",
+                    *(["archisynapse.stripe"] if (
+                        receipt.metadata.get("stripe_event_id")
+                        or receipt.metadata.get("processor") == "stripe"
+                        or receipt.metadata.get("payment_provider") == "stripe"
+                    ) else []),
+                ],
                 "parent_receipt_ids": [receipt.economic_truth_authorization_receipt_id]
                     if receipt.economic_truth_authorization_receipt_id else [],
             },
@@ -376,16 +385,37 @@ async def verify_receipt(event_id: str):
         raise HTTPException(status_code=404, detail="Receipt not found")
     receipt = await refresh_receipt_state(receipt_store[event_id])
     receipt_store[event_id] = receipt
+    components = {
+        "fraud_checked": receipt.fraud_decision is not None,
+        "transaction_processed": receipt.transaction_id is not None,
+        "ledger_posted": receipt.ledger_transaction_id is not None,
+        "analytics_recorded": receipt.analytics_recorded,
+    }
+    independently_verified = all(components.values()) and receipt.status == "completed"
+    truth_result = None
+    if independently_verified and receipt.economic_truth_action_id:
+        outbox_row = await enqueue_economic_truth_event(
+            source="archisynapse-reconciliation",
+            external_id=f"verification:{event_id}",
+            action_id=receipt.economic_truth_action_id,
+            stage="verify",
+            payload={
+                "independent": True,
+                "verified_by": "archisynapse-reconciliation",
+                "external_id": event_id,
+                "checks": components,
+                "receipt_signature_verified": True,
+                "coverage_surfaces": ["archisynapse.payment", "archisynapse.ledger"],
+            },
+        )
+        truth_result = await deliver_economic_truth_event(outbox_row)
     return {
         "event_id": event_id,
         "correlation_id": receipt.correlation_id,
         "status": receipt.status,
-        "components": {
-            "fraud_checked": receipt.fraud_decision is not None,
-            "transaction_processed": receipt.transaction_id is not None,
-            "ledger_posted": receipt.ledger_transaction_id is not None,
-            "analytics_recorded": receipt.analytics_recorded,
-        },
+        "verified": independently_verified,
+        "economic_truth": truth_result,
+        "components": components,
         "errors": {
             "fraud": receipt.fraud_error,
             "transaction": receipt.transaction_error,
@@ -393,7 +423,6 @@ async def verify_receipt(event_id: str):
             "analytics": receipt.analytics_error,
         },
     }
-
 
 class RefundRequest(BaseModel):
     amount: str
@@ -444,6 +473,7 @@ async def refund_payment(payment_id: str, request: RefundRequest):
                 "payment_id": payment_id,
                 "refund": refund,
                 "ledger_reversal_recorded": bool(result.get("analytics_reversed")),
+                "coverage_surfaces": ["archisynapse.reversal"],
             },
         )
         asyncio.create_task(deliver_economic_truth_event(outbox_row))
