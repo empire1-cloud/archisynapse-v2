@@ -3,7 +3,6 @@ FastAPI routes for the Lyrica royalty receipt loop.
 Included into the main gateway app (see main.py: app.include_router(royalty_router)).
 """
 
-import asyncio
 import os
 
 from fastapi import APIRouter, Depends, HTTPException, Request
