@@ -94,7 +94,8 @@ async def deliver_event(row: dict[str, Any], transport=None) -> dict[str, Any]:
             heartbeat_path = f"{api_url}/api/economic-truth/coverage/heartbeat"
             heartbeat_body = {"surface_id": surface_id, "healthy": True, "detail": {"action_id": row["action_id"], "external_id": row["external_id"]}}
             if transport is None:
-                heartbeat_response = await client.post(heartbeat_path, headers={"x-economic-truth-key": api_key}, json=heartbeat_body)
+                async with httpx.AsyncClient(timeout=float(os.getenv("ECONOMIC_TRUTH_TIMEOUT_SECONDS", "8"))) as heartbeat_client:
+                    heartbeat_response = await heartbeat_client.post(heartbeat_path, headers={"x-economic-truth-key": api_key}, json=heartbeat_body)
             else:
                 heartbeat_response = await transport(heartbeat_path, heartbeat_body)
             if heartbeat_response.status_code >= 400:
