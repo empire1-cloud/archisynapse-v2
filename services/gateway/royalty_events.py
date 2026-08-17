@@ -63,6 +63,15 @@ class Amount(BaseModel):
         return v
 
 
+class EconomicTruthRef(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    contract_version: str
+    action_id: str
+    authorization_receipt_id: str
+    intent_token_id: Optional[str] = None
+    authorized_by: str
+
+
 class RoyaltyObligationCreated(BaseModel):
     """royalty.obligation.created, schema_version 1.0."""
 
@@ -80,6 +89,7 @@ class RoyaltyObligationCreated(BaseModel):
     splits: list[Split]
     trigger: Trigger
     amount: Amount
+    economic_truth: Optional[EconomicTruthRef] = None
 
     @model_validator(mode="after")
     def splits_sum_to_10000(self) -> "RoyaltyObligationCreated":

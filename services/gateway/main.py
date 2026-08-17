@@ -2,6 +2,7 @@
 Archisynapse API Gateway - Revenue Assurance Loop v1.
 """
 
+import asyncio
 import logging
 import os
 from datetime import datetime, timezone
@@ -14,6 +15,14 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from canonical_event import PaymentRequest, UnifiedReceipt
+from economic_truth_bridge import (
+    EconomicTruthConfigurationError,
+    deliver_event as deliver_economic_truth_event,
+    enqueue_event as enqueue_economic_truth_event,
+    enforcement_enabled as economic_truth_enforcement_enabled,
+    flush_outbox as flush_economic_truth_outbox,
+    require_action_authority,
+)
 from orchestrator import orchestrator
 from royalty_db import close_pool as close_royalty_pool, init_pool as init_royalty_pool
 from royalty_routes import close_royalty_transaction_client, royalty_router
@@ -81,6 +90,8 @@ class HealthResponse(BaseModel):
 
 @app.on_event("startup")
 async def startup():
+    if os.getenv("ENVIRONMENT", "development").lower() == "production" and not economic_truth_enforcement_enabled():
+        raise RuntimeError("Production refuses to start without ECONOMIC_TRUTH_ENFORCEMENT=true")
     # Load persisted receipts from disk
     saved = load_all_receipts()
     for event_id, receipt_data in saved.items():
@@ -243,11 +254,17 @@ async def bootstrap_merchant(request: MerchantBootstrapRequest):
 @app.post("/admin/recovery/replay")
 async def replay_recovery():
     results = await orchestrator.replay_pending_recoveries(merchant_credentials_store)
-    return results
+    truth = await flush_economic_truth_outbox()
+    return {"revenue_recovery": results, "economic_truth": truth}
 
 
 @app.post("/v1/revenue/process", response_model=UnifiedReceipt)
 async def process_payment(request: ProcessPaymentRequest):
+    try:
+        economic_action_id = require_action_authority(request.metadata)
+    except EconomicTruthConfigurationError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    authorization_receipt_id = str(request.metadata.get("economic_truth_authorization_receipt_id") or "")
     merchant_id = _merchant_id_value(request.merchant_id)
     if request.idempotency_key:
         cache_key = _idempotency_store_key(merchant_id, request.idempotency_key)
@@ -270,6 +287,8 @@ async def process_payment(request: ProcessPaymentRequest):
         payment_method_brand=payment_method["brand"],
         description=request.description,
         metadata=request.metadata,
+        economic_truth_action_id=economic_action_id or None,
+        economic_truth_authorization_receipt_id=authorization_receipt_id or None,
         ip_address=request.ip_address,
         country=request.country,
         device_id=request.device_id,
@@ -288,7 +307,39 @@ async def process_payment(request: ProcessPaymentRequest):
     correlation_store[receipt.correlation_id] = receipt.event_id
     if receipt.idempotency_key:
         request_store[_idempotency_store_key(receipt.merchant_id, receipt.idempotency_key)] = receipt
-    save_receipt(receipt.model_dump())
+    receipt_document = receipt.model_dump()
+    save_receipt(receipt_document)
+    if receipt.economic_truth_action_id:
+        outbox_row = await enqueue_economic_truth_event(
+            source="archisynapse",
+            external_id=receipt.event_id,
+            action_id=receipt.economic_truth_action_id,
+            stage="outcome",
+            payload={
+                "source": "archisynapse",
+                "external_id": receipt.event_id,
+                "refused": receipt.status in {"blocked", "failed"},
+                "correlation_id": receipt.correlation_id,
+                "fraud_decision": receipt.fraud_decision,
+                "fraud_score": receipt.fraud_score,
+                "transaction_id": receipt.transaction_id,
+                "ledger_transaction_id": receipt.ledger_transaction_id,
+                "analytics_recorded": receipt.analytics_recorded,
+                "status": receipt.status,
+                "coverage_surfaces": [
+                    "archisynapse.payment",
+                    "archisynapse.ledger",
+                    *(["archisynapse.stripe"] if (
+                        receipt.metadata.get("stripe_event_id")
+                        or receipt.metadata.get("processor") == "stripe"
+                        or receipt.metadata.get("payment_provider") == "stripe"
+                    ) else []),
+                ],
+                "parent_receipt_ids": [receipt.economic_truth_authorization_receipt_id]
+                    if receipt.economic_truth_authorization_receipt_id else [],
+            },
+        )
+        asyncio.create_task(deliver_economic_truth_event(outbox_row))
     return receipt
 
 
@@ -334,16 +385,37 @@ async def verify_receipt(event_id: str):
         raise HTTPException(status_code=404, detail="Receipt not found")
     receipt = await refresh_receipt_state(receipt_store[event_id])
     receipt_store[event_id] = receipt
+    components = {
+        "fraud_checked": receipt.fraud_decision is not None,
+        "transaction_processed": receipt.transaction_id is not None,
+        "ledger_posted": receipt.ledger_transaction_id is not None,
+        "analytics_recorded": receipt.analytics_recorded,
+    }
+    independently_verified = all(components.values()) and receipt.status == "completed"
+    truth_result = None
+    if independently_verified and receipt.economic_truth_action_id:
+        outbox_row = await enqueue_economic_truth_event(
+            source="archisynapse-reconciliation",
+            external_id=f"verification:{event_id}",
+            action_id=receipt.economic_truth_action_id,
+            stage="verify",
+            payload={
+                "independent": True,
+                "verified_by": "archisynapse-reconciliation",
+                "external_id": event_id,
+                "checks": components,
+                "receipt_signature_verified": True,
+                "coverage_surfaces": ["archisynapse.payment", "archisynapse.ledger"],
+            },
+        )
+        truth_result = await deliver_economic_truth_event(outbox_row)
     return {
         "event_id": event_id,
         "correlation_id": receipt.correlation_id,
         "status": receipt.status,
-        "components": {
-            "fraud_checked": receipt.fraud_decision is not None,
-            "transaction_processed": receipt.transaction_id is not None,
-            "ledger_posted": receipt.ledger_transaction_id is not None,
-            "analytics_recorded": receipt.analytics_recorded,
-        },
+        "verified": independently_verified,
+        "economic_truth": truth_result,
+        "components": components,
         "errors": {
             "fraud": receipt.fraud_error,
             "transaction": receipt.transaction_error,
@@ -351,7 +423,6 @@ async def verify_receipt(event_id: str):
             "analytics": receipt.analytics_error,
         },
     }
-
 
 class RefundRequest(BaseModel):
     amount: str
@@ -387,6 +458,26 @@ async def refund_payment(payment_id: str, request: RefundRequest):
     if not result["refund_succeeded"]:
         raise HTTPException(status_code=502, detail=result.get("error", "Refund failed"))
 
+    if original_receipt.economic_truth_action_id:
+        refund = result.get("refund") or {}
+        reversal_external_id = str(refund.get("id") or request.idempotency_key or f"refund:{payment_id}")
+        outbox_row = await enqueue_economic_truth_event(
+            source="archisynapse",
+            external_id=reversal_external_id,
+            action_id=original_receipt.economic_truth_action_id,
+            stage="reverse",
+            payload={
+                "source": "archisynapse",
+                "external_id": reversal_external_id,
+                "reason": request.reason,
+                "payment_id": payment_id,
+                "refund": refund,
+                "ledger_reversal_recorded": bool(result.get("analytics_reversed")),
+                "coverage_surfaces": ["archisynapse.reversal"],
+            },
+        )
+        asyncio.create_task(deliver_economic_truth_event(outbox_row))
+
     return {
         "transaction_id": payment_id,
         "refund_succeeded": result["refund_succeeded"],
@@ -395,11 +486,12 @@ async def refund_payment(payment_id: str, request: RefundRequest):
     }
 
 
-@app.post("/admin/recovery/replay")
-async def replay_recovery():
-    """Replay pending ledger/analytics recovery items."""
+@app.post("/admin/recovery/replay-legacy")
+async def replay_recovery_legacy():
+    """Compatibility alias; replays both financial recovery and Economic Truth outbox."""
     result = await orchestrator.replay_pending_recoveries(merchant_credentials_store)
-    return {"replayed": result}
+    truth = await flush_economic_truth_outbox()
+    return {"replayed": result, "economic_truth": truth}
 
 
 @app.get("/dashboard", response_class=HTMLResponse)
