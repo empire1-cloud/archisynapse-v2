@@ -157,6 +157,17 @@ async def load_royalty_receipt(receipt_id: str) -> Optional[dict]:
     return json.loads(row["payload"])
 
 
+async def load_royalty_receipt_by_event(event_id: str) -> Optional[dict]:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT payload FROM royalty_receipts WHERE event_id=$1 ORDER BY created_at LIMIT 1", event_id
+    )
+    if row is None:
+        return None
+    import json
+    return json.loads(row["payload"])
+
+
 # ---------------------------------------------------------------------------
 # Rejections (signature/auth failures -- no financial objects created)
 # ---------------------------------------------------------------------------

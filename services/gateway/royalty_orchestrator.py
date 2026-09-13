@@ -168,6 +168,7 @@ def _build_receipt(
             "checks": ["ownership_verified", "dna_match", "vics_valid"],
         },
         "issued_at": issued_at,
+        "economic_truth": event.economic_truth.model_dump() if event.economic_truth else None,
     }
     signature = gateway_receipt_signer.sign(json.dumps(receipt_body, sort_keys=True).encode("utf-8"))
     return {**receipt_body, "signature": signature}

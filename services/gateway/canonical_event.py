@@ -41,6 +41,10 @@ class CanonicalEvent(BaseModel):
     transaction_id: Optional[str] = None
     idempotency_key: str = Field(default_factory=lambda: f"idem_{uuid.uuid4().hex[:16]}")
 
+    # Cross-system Economic Truth identity
+    economic_truth_action_id: Optional[str] = None
+    economic_truth_authorization_receipt_id: Optional[str] = None
+
     # Customer
     customer_id: str
 
@@ -137,6 +141,8 @@ class PaymentRequest(BaseModel):
     payment_method_brand: str = "VISA"
     description: Optional[str] = None
     metadata: dict = Field(default_factory=dict)
+    economic_truth_action_id: Optional[str] = None
+    economic_truth_authorization_receipt_id: Optional[str] = None
 
     # Fraud signals
     ip_address: Optional[str] = None
@@ -152,6 +158,8 @@ class PaymentRequest(BaseModel):
         return CanonicalEvent(
             merchant_id=self.merchant_id,
             customer_id=self.customer_id,
+            economic_truth_action_id=self.economic_truth_action_id,
+            economic_truth_authorization_receipt_id=self.economic_truth_authorization_receipt_id,
             amount_minor=dollars_to_minor(self.amount),
             fee_minor=dollars_to_minor(self.fee_amount),
             currency=self.currency,
@@ -173,6 +181,8 @@ class UnifiedReceipt(BaseModel):
     correlation_id: str
     merchant_id: str
     customer_id: str
+    economic_truth_action_id: Optional[str] = None
+    economic_truth_authorization_receipt_id: Optional[str] = None
     transaction_id: Optional[str] = None
     amount: float
     fee_amount: float = 0.0
@@ -216,6 +226,8 @@ class UnifiedReceipt(BaseModel):
             correlation_id=event.correlation_id,
             merchant_id=event.merchant_id,
             customer_id=event.customer_id,
+            economic_truth_action_id=event.economic_truth_action_id,
+            economic_truth_authorization_receipt_id=event.economic_truth_authorization_receipt_id,
             transaction_id=event.transaction_id,
             amount=event.amount_dollars,
             fee_amount=event.fee_dollars,
