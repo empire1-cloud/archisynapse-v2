@@ -31,10 +31,14 @@ from gateway_store import (
 )
 from orchestrator import orchestrator
 from receipt_proof import (
+    ReceiptKeyRing,
     ReceiptProofConfigurationError,
     ReceiptSigner,
+    build_receipt_keyring_from_env,
     build_receipt_signer_from_env,
+    keyring_trusted_keys,
     verify_receipt,
+    verify_receipt_trusted,
 )
 from royalty_db import close_pool, get_pool, init_pool
 from royalty_routes import close_royalty_transaction_client, royalty_router
@@ -57,6 +61,23 @@ app.include_router(royalty_router)
 
 _store: GatewayStore | None = None
 _receipt_signer: ReceiptSigner | None = None
+_receipt_keyring: ReceiptKeyRing | None = None
+
+
+def _verify_stored_receipt(receipt: dict[str, Any]) -> tuple[bool, str, str]:
+    """Trusted-key verification when signing is configured; legacy check otherwise.
+
+    Returns (valid, message, key_status) where key_status is active, retired,
+    unknown, or unchecked (no key ring configured).
+    """
+    if _receipt_keyring is None:
+        valid, message = verify_receipt(receipt)
+        return valid, message, "unchecked"
+    proof = receipt.get("_proof") if isinstance(receipt, dict) else None
+    key_id = str(proof.get("key_id", "")) if isinstance(proof, dict) else ""
+    known = _receipt_keyring.get(key_id)
+    valid, message = verify_receipt_trusted(receipt, keyring_trusted_keys(_receipt_keyring))
+    return valid, message, known.status if known else "unknown"
 
 
 class MerchantCreateRequest(BaseModel):
@@ -134,11 +155,12 @@ def _build_cipher() -> CredentialCipher | None:
 
 @app.on_event("startup")
 async def startup() -> None:
-    global _store, _receipt_signer
+    global _store, _receipt_signer, _receipt_keyring
     pool = await init_pool()
     _store = GatewayStore(pool, _build_cipher())
     try:
-        _receipt_signer = build_receipt_signer_from_env()
+        _receipt_keyring = build_receipt_keyring_from_env()
+        _receipt_signer = _receipt_keyring.active if _receipt_keyring else None
     except ReceiptProofConfigurationError as exc:
         raise RuntimeError(f"receipt signing configuration is invalid: {exc}") from exc
 
@@ -351,6 +373,22 @@ async def receipt_proof_key() -> dict[str, Any]:
     }
 
 
+@app.get("/v1/proof/keys")
+async def receipt_proof_keys() -> dict[str, Any]:
+    """Every public key whose receipts are trusted: the active key plus retired
+    keys kept after rotation. Save this once to verify receipts offline."""
+    if _receipt_keyring is None:
+        raise HTTPException(status_code=404, detail="receipt signing is not configured")
+    return {
+        "algorithm": ReceiptSigner.algorithm,
+        "active_key_id": _receipt_keyring.active.key_id,
+        "keys": [
+            {"key_id": k.key_id, "public_key_b64": k.public_key_b64, "status": k.status}
+            for k in _receipt_keyring.keys()
+        ],
+    }
+
+
 @app.post("/v1/payments", response_model=UnifiedReceipt, status_code=201)
 @app.post("/v1/revenue/process", response_model=UnifiedReceipt, status_code=201)
 async def process_payment(
@@ -470,8 +508,13 @@ async def get_receipt_evidence(
     )
     if receipt is None:
         raise HTTPException(status_code=404, detail="receipt not found")
-    valid, message = verify_receipt(receipt)
-    return {"receipt": receipt, "signature_valid": valid, "verification": message}
+    valid, message, key_status = _verify_stored_receipt(receipt)
+    return {
+        "receipt": receipt,
+        "signature_valid": valid,
+        "verification": message,
+        "key_status": key_status,
+    }
 
 
 @app.get("/v1/receipts/{event_id}/verify")
@@ -485,12 +528,13 @@ async def verify_stored_receipt(
     )
     if receipt is None:
         raise HTTPException(status_code=404, detail="receipt not found")
-    valid, message = verify_receipt(receipt)
+    valid, message, key_status = _verify_stored_receipt(receipt)
     proof = receipt.get("_proof") if isinstance(receipt, dict) else None
     return {
         "event_id": event_id,
         "valid": valid,
         "message": message,
+        "key_status": key_status,
         "proof": proof,
     }
 
