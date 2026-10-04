@@ -200,13 +200,15 @@ class TenantIsolationRlsTests(unittest.IsolatedAsyncioTestCase):
     async def test_cannot_update_another_tenants_rows(self):
         status = await self._as_tenant(
             self.tenant_a,
-            "UPDATE payments SET description = 'tampered' WHERE id = $1",
+            # failure_reason is a column the tenant role may update (migration 008),
+            # so this checks row filtering, not column privileges.
+            "UPDATE payments SET failure_reason = 'tampered' WHERE id = $1",
             self.ids[self.tenant_b]["payment"],
             method="execute",
         )
         self.assertEqual(status, "UPDATE 0")
         description = await self.conn.fetchval(
-            "SELECT description FROM payments WHERE id = $1",
+            "SELECT failure_reason FROM payments WHERE id = $1",
             self.ids[self.tenant_b]["payment"],
         )
         self.assertIsNone(description)
