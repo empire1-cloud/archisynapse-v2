@@ -74,6 +74,7 @@ jobs:
           python -m unittest discover -s tests -p "test_gateway_store.py" -v
           python -m unittest discover -s tests -p "test_receipt_proof.py" -v
           python -m unittest discover -s tests -p "test_gateway_postgres_concurrency.py" -v
+          python -m unittest discover -s tests -p "test_tenant_isolation_rls.py" -v
 
   transaction-node:
     runs-on: ubuntu-latest
