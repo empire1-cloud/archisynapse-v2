@@ -9,7 +9,9 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import secrets
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -21,6 +23,23 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 
 _PASSWORD_HASHER = PasswordHasher()
+
+# Tenant isolation (migrations 007/008). "enforce" (default): every
+# merchant-scoped query runs as the restricted role `archisynapse_tenant` with
+# the merchant id set, so PostgreSQL row-level security limits it to that
+# merchant's rows even if a query forgets its WHERE clause. "off": previous
+# behaviour (owner connection). Merchant provisioning and API-key
+# authentication always run as the owner: they happen before the merchant is
+# known.
+TENANT_ROLE = "archisynapse_tenant"
+
+
+def tenant_isolation_from_env(environ: Mapping[str, str] | None = None) -> bool:
+    value = (environ or os.environ).get("ARCHISYNAPSE_TENANT_ISOLATION", "enforce")
+    value = value.strip().lower()
+    if value not in {"enforce", "off"}:
+        raise ValueError("ARCHISYNAPSE_TENANT_ISOLATION must be 'enforce' or 'off'")
+    return value == "enforce"
 _ALLOWED_ENVIRONMENTS = {"test", "live"}
 
 
@@ -168,9 +187,36 @@ def _decode_json(value: Any) -> Any:
 class GatewayStore:
     """PostgreSQL-backed operational store for the public gateway."""
 
-    def __init__(self, pool: Any, cipher: CredentialCipher | None) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        cipher: CredentialCipher | None,
+        *,
+        tenant_isolation: bool | None = None,
+    ) -> None:
         self.pool = pool
         self.cipher = cipher
+        self.tenant_isolation = (
+            tenant_isolation_from_env() if tenant_isolation is None else tenant_isolation
+        )
+
+    @asynccontextmanager
+    async def tenant_connection(self, merchant_id: str):
+        """A connection inside one transaction, scoped to `merchant_id`.
+
+        The role switch and tenant setting are LOCAL, so they end with the
+        transaction and never leak to the next user of the pooled connection.
+        """
+        if not merchant_id:
+            raise ValueError("merchant_id is required for a tenant-scoped query")
+        async with self.pool.acquire() as connection:
+            async with connection.transaction():
+                if self.tenant_isolation:
+                    await connection.execute(f"SET LOCAL ROLE {TENANT_ROLE}")
+                    await connection.execute(
+                        "SELECT set_config('archisynapse.tenant_id', $1, true)", merchant_id
+                    )
+                yield connection
 
     async def provision_merchant(
         self,
@@ -266,7 +312,7 @@ class GatewayStore:
     async def get_service_credentials(self, merchant_id: str) -> dict[str, str | None]:
         if self.cipher is None:
             raise CredentialConfigurationError("gateway master key is not configured")
-        async with self.pool.acquire() as connection:
+        async with self.tenant_connection(merchant_id) as connection:
             row = await connection.fetchrow(
                 """
                 SELECT encrypted_service_credentials, credentials_key_id
@@ -291,71 +337,70 @@ class GatewayStore:
     ) -> IdempotencyClaim:
         if not idempotency_key.strip():
             raise ValueError("Idempotency-Key is required")
-        async with self.pool.acquire() as connection:
-            async with connection.transaction():
-                inserted = await connection.fetchrow(
+        async with self.tenant_connection(merchant_id) as connection:
+            inserted = await connection.fetchrow(
+                """
+                INSERT INTO gateway_payment_idempotency (
+                    merchant_id, idempotency_key, request_hash, status
+                ) VALUES ($1, $2, $3, 'PROCESSING')
+                ON CONFLICT (merchant_id, idempotency_key) DO NOTHING
+                RETURNING merchant_id
+                """,
+                merchant_id,
+                idempotency_key,
+                request_hash,
+            )
+            if inserted is not None:
+                return IdempotencyClaim(state="new")
+
+            row = await connection.fetchrow(
+                """
+                SELECT request_hash, status, event_id, claimed_at
+                  FROM gateway_payment_idempotency
+                 WHERE merchant_id = $1 AND idempotency_key = $2
+                 FOR UPDATE
+                """,
+                merchant_id,
+                idempotency_key,
+            )
+            if row is None:
+                raise GatewayStoreError("idempotency row disappeared")
+            if row["request_hash"] != request_hash:
+                raise IdempotencyConflict(
+                    "Idempotency-Key was already used for a different request"
+                )
+            if row["status"] == "COMPLETED":
+                return IdempotencyClaim(state="replay", event_id=row["event_id"])
+            if row["status"] == "PROCESSING":
+                reclaimed = await connection.fetchrow(
                     """
-                    INSERT INTO gateway_payment_idempotency (
-                        merchant_id, idempotency_key, request_hash, status
-                    ) VALUES ($1, $2, $3, 'PROCESSING')
-                    ON CONFLICT (merchant_id, idempotency_key) DO NOTHING
+                    UPDATE gateway_payment_idempotency
+                       SET claimed_at = now(), failed_at = NULL, failure_reason = NULL
+                     WHERE merchant_id = $1 AND idempotency_key = $2
+                       AND claimed_at <= now() - ($3 * interval '1 second')
                     RETURNING merchant_id
                     """,
                     merchant_id,
                     idempotency_key,
-                    request_hash,
+                    reclaim_after_seconds,
                 )
-                if inserted is not None:
-                    return IdempotencyClaim(state="new")
-
-                row = await connection.fetchrow(
-                    """
-                    SELECT request_hash, status, event_id, claimed_at
-                      FROM gateway_payment_idempotency
-                     WHERE merchant_id = $1 AND idempotency_key = $2
-                     FOR UPDATE
-                    """,
-                    merchant_id,
-                    idempotency_key,
-                )
-                if row is None:
-                    raise GatewayStoreError("idempotency row disappeared")
-                if row["request_hash"] != request_hash:
-                    raise IdempotencyConflict(
-                        "Idempotency-Key was already used for a different request"
+                if reclaimed is None:
+                    raise IdempotencyInProgress(
+                        "another request is already processing this Idempotency-Key"
                     )
-                if row["status"] == "COMPLETED":
-                    return IdempotencyClaim(state="replay", event_id=row["event_id"])
-                if row["status"] == "PROCESSING":
-                    reclaimed = await connection.fetchrow(
-                        """
-                        UPDATE gateway_payment_idempotency
-                           SET claimed_at = now(), failed_at = NULL, failure_reason = NULL
-                         WHERE merchant_id = $1 AND idempotency_key = $2
-                           AND claimed_at <= now() - ($3 * interval '1 second')
-                        RETURNING merchant_id
-                        """,
-                        merchant_id,
-                        idempotency_key,
-                        reclaim_after_seconds,
-                    )
-                    if reclaimed is None:
-                        raise IdempotencyInProgress(
-                            "another request is already processing this Idempotency-Key"
-                        )
-                    return IdempotencyClaim(state="reclaimed")
+                return IdempotencyClaim(state="reclaimed")
 
-                await connection.execute(
-                    """
-                    UPDATE gateway_payment_idempotency
-                       SET status = 'PROCESSING', claimed_at = now(),
-                           failed_at = NULL, failure_reason = NULL
-                     WHERE merchant_id = $1 AND idempotency_key = $2
-                    """,
-                    merchant_id,
-                    idempotency_key,
-                )
-                return IdempotencyClaim(state="retry")
+            await connection.execute(
+                """
+                UPDATE gateway_payment_idempotency
+                   SET status = 'PROCESSING', claimed_at = now(),
+                       failed_at = NULL, failure_reason = NULL
+                 WHERE merchant_id = $1 AND idempotency_key = $2
+                """,
+                merchant_id,
+                idempotency_key,
+            )
+            return IdempotencyClaim(state="retry")
 
     async def save_receipt(
         self,
@@ -369,7 +414,7 @@ class GatewayStore:
         correlation_id = str(receipt["correlation_id"])
         status = str(receipt["status"])
         payload = json.dumps(dict(receipt), sort_keys=True, default=str)
-        async with self.pool.acquire() as connection:
+        async with self.tenant_connection(merchant_id) as connection:
             await connection.execute(
                 """
                 INSERT INTO gateway_payment_receipts (
@@ -393,7 +438,7 @@ class GatewayStore:
     async def complete_idempotency(
         self, *, merchant_id: str, idempotency_key: str, event_id: str
     ) -> None:
-        async with self.pool.acquire() as connection:
+        async with self.tenant_connection(merchant_id) as connection:
             await connection.execute(
                 """
                 UPDATE gateway_payment_idempotency
@@ -409,7 +454,7 @@ class GatewayStore:
     async def fail_idempotency(
         self, *, merchant_id: str, idempotency_key: str, reason: str
     ) -> None:
-        async with self.pool.acquire() as connection:
+        async with self.tenant_connection(merchant_id) as connection:
             await connection.execute(
                 """
                 UPDATE gateway_payment_idempotency
@@ -422,7 +467,7 @@ class GatewayStore:
             )
 
     async def get_receipt(self, *, merchant_id: str, event_id: str) -> dict[str, Any] | None:
-        async with self.pool.acquire() as connection:
+        async with self.tenant_connection(merchant_id) as connection:
             row = await connection.fetchrow(
                 """
                 SELECT payload FROM gateway_payment_receipts
@@ -436,7 +481,7 @@ class GatewayStore:
     async def get_receipt_by_transaction_id(
         self, *, merchant_id: str, transaction_id: str
     ) -> dict[str, Any] | None:
-        async with self.pool.acquire() as connection:
+        async with self.tenant_connection(merchant_id) as connection:
             row = await connection.fetchrow(
                 """
                 SELECT payload FROM gateway_payment_receipts
@@ -454,7 +499,7 @@ class GatewayStore:
         self, *, merchant_id: str, limit: int = 20, status: str | None = None
     ) -> list[dict[str, Any]]:
         limit = max(1, min(limit, 100))
-        async with self.pool.acquire() as connection:
+        async with self.tenant_connection(merchant_id) as connection:
             if status:
                 rows = await connection.fetch(
                     """
