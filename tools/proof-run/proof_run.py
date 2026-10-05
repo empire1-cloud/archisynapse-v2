@@ -124,3 +124,5 @@ run["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 run["steps"] = log; run["all_passed"] = all(s["passed"] for s in log)
 save("99-summary", run)
 print("ALL PASSED" if run["all_passed"] else "SOME STEPS FAILED")
+# Non-zero exit on any failed step, so CI (Docker stack workflow) goes red.
+raise SystemExit(0 if run["all_passed"] else 1)
