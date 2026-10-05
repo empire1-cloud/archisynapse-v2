@@ -1,0 +1,12 @@
+-- Runs once, when the docker-compose Postgres volume is first created
+-- (mounted into /docker-entrypoint-initdb.d after the migrations).
+--
+-- The analytics service creates its own SQLAlchemy tables named `merchants`
+-- and `transactions`. `transactions` is the ledger's table (migration 002) and
+-- `merchants` is the fraud service's table, so in the shared `archisynapse`
+-- database analytics either fails or would write into the wrong table. It gets
+-- its own database instead.
+--
+-- Existing volumes do not re-run init scripts. On an existing deployment run:
+--   psql -U postgres -c "CREATE DATABASE archisynapse_analytics"
+CREATE DATABASE archisynapse_analytics;
