@@ -68,6 +68,7 @@ jobs:
           services/gateway/gateway_store.py
           services/gateway/production_main.py
           services/gateway/receipt_proof.py
+          services/gateway/service_auth.py
           tools/live-dollar-smoke/app.py
 
       - name: Run gateway utility and proof tests
@@ -79,6 +80,7 @@ jobs:
           python -m unittest discover -s tests -p "test_receipt_key_rotation.py" -v
           python -m unittest discover -s tests -p "test_gateway_postgres_concurrency.py" -v
           python -m unittest discover -s tests -p "test_tenant_isolation_rls.py" -v
+          python -m unittest discover -s tests -p "test_service_auth_headers.py" -v
           python -m unittest discover -s tests -p "test_tenant_ledger_immutability.py" -v
           python -m unittest discover -s tests -p "test_transaction_request_contract.py" -v
 

@@ -23,6 +23,9 @@ from pathlib import Path
 import asyncpg
 import httpx
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from local_service_tokens import local_service_token_env  # noqa: E402
+
 sys.path.insert(0, os.path.dirname(__file__))
 from royalty_keys import generate_tenant_keypair, sign_with_private_key  # noqa: E402
 
@@ -113,6 +116,7 @@ async def wait_healthy(client: httpx.AsyncClient, url: str, timeout: float = 20.
 
 
 def start_services(royalty_loop_enabled: str = "true") -> dict:
+    tokens = local_service_token_env()
     env = {
         **os.environ,
         "DB_HOST": "127.0.0.1",
@@ -125,14 +129,14 @@ def start_services(royalty_loop_enabled: str = "true") -> dict:
     ledger = subprocess.Popen(
         [TSX, "ledger-service-index.ts"],
         cwd=str(LEDGER_DIR),
-        env={**env, "PORT": str(LEDGER_PORT)},
+        env={**env, **tokens["ledger"], "PORT": str(LEDGER_PORT)},
         stdout=open("/tmp/real-suite-ledger.log", "w"),
         stderr=subprocess.STDOUT,
     )
     transaction = subprocess.Popen(
         [TSX, "transaction-service-index.ts"],
         cwd=str(TRANSACTION_DIR),
-        env={**env, "PORT": str(TRANSACTION_PORT)},
+        env={**env, **tokens["transaction"], "PORT": str(TRANSACTION_PORT)},
         stdout=open("/tmp/real-suite-transaction.log", "w"),
         stderr=subprocess.STDOUT,
     )
@@ -157,6 +161,7 @@ def start_services(royalty_loop_enabled: str = "true") -> dict:
         "ROYALTY_LOOP_ENABLED": royalty_loop_enabled,
         "ROYALTY_ADMIN_TOKEN": ADMIN_TOKEN,
         "ROYALTY_TEST_FIXTURES_ENABLED": "true",
+        **tokens["gateway"],
     }
     gateway = subprocess.Popen(
         [sys.executable, "-c", f"import uvicorn; uvicorn.run('main:app', host='127.0.0.1', port={GATEWAY_PORT}, log_level='warning')"],

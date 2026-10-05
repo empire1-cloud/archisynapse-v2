@@ -1,5 +1,7 @@
 import { Decimal } from 'decimal.js';
 
+import { outboundServiceToken, serviceAuthHeaders } from './service-auth';
+
 /**
  * LedgerClient: HTTP client for calling the Ledger Service.
  * The Transaction Service NEVER writes ledger data directly —
@@ -13,15 +15,35 @@ import { Decimal } from 'decimal.js';
  */
 export class LedgerClient {
   private baseUrl: string;
+  private serviceToken: string | null | undefined;
 
-  constructor(baseUrl: string = process.env.LEDGER_SERVICE_URL || 'http://localhost:3001') {
+  /**
+   * serviceToken proves to the ledger that this is the transaction service
+   * (service-auth.ts). When not passed, it is read on every call from
+   * ARCHISYNAPSE_TRANSACTION_TO_LEDGER_TOKEN or ..._TOKEN_FILE, so a rotated
+   * token file takes effect without a restart. Without one, an enforcing
+   * ledger rejects every call: fail closed.
+   */
+  constructor(
+    baseUrl: string = process.env.LEDGER_SERVICE_URL || 'http://localhost:3001',
+    serviceToken?: string | null
+  ) {
     this.baseUrl = baseUrl;
+    this.serviceToken = serviceToken;
+  }
+
+  private get authHeaders(): Record<string, string> {
+    return serviceAuthHeaders(
+      this.serviceToken !== undefined
+        ? this.serviceToken
+        : outboundServiceToken('ARCHISYNAPSE_TRANSACTION_TO_LEDGER')
+    );
   }
 
   async listAccounts(params: { organizationId: string }): Promise<Array<{ id: string; code: string; name: string; type: string; currency: string }>> {
     const res = await fetch(`${this.baseUrl}/accounts`, {
       headers: {
-        'X-Organization-ID': params.organizationId,
+        ...this.authHeaders, 'X-Organization-ID': params.organizationId,
       },
     });
 
@@ -44,7 +66,7 @@ export class LedgerClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Organization-ID': params.organizationId,
+        ...this.authHeaders, 'X-Organization-ID': params.organizationId,
       },
       body: JSON.stringify({
         code: params.code,
@@ -114,7 +136,7 @@ export class LedgerClient {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Organization-ID': params.organizationId,
+        ...this.authHeaders, 'X-Organization-ID': params.organizationId,
       },
       body: JSON.stringify({
         type: 'PAYMENT',
@@ -150,7 +172,7 @@ export class LedgerClient {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Organization-ID': params.organizationId,
+          ...this.authHeaders, 'X-Organization-ID': params.organizationId,
         },
         body: JSON.stringify({ reason: params.reason }),
       }

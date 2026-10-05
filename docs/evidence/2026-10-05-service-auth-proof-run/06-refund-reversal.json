@@ -1,0 +1,78 @@
+{
+  "credits": "12.5000",
+  "debits": "12.5000",
+  "http_status": 200,
+  "original_transaction_status": [
+    {
+      "status": "REVERSED"
+    }
+  ],
+  "payment_status": [
+    {
+      "status": "REFUNDED"
+    }
+  ],
+  "processor_refund_attempt": [
+    {
+      "ledger_transaction_id": "93f97964-8303-4fe3-a577-097ac5e340e1",
+      "processor_refund_id": "re_stub_49a84cd8358548dd",
+      "status": "LEDGER_SUCCEEDED"
+    }
+  ],
+  "response": {
+    "analytics_reversed": true,
+    "error": null,
+    "refund": {
+      "amount": "12.5",
+      "createdAt": "2026-10-05T10:37:58.651Z",
+      "id": "bf8e7a5c-3aae-42ca-8a75-43113eb8dd59",
+      "ledgerTransactionId": "93f97964-8303-4fe3-a577-097ac5e340e1",
+      "organizationId": "mer_b83c8f8ea70ac69cc7d92f23",
+      "paymentId": "263df76d-997c-4e41-aaf7-c038e5dcc355",
+      "processorRefundId": "re_stub_49a84cd8358548dd",
+      "reason": "customer_requested",
+      "status": "SUCCEEDED"
+    },
+    "refund_succeeded": true,
+    "transaction_id": "263df76d-997c-4e41-aaf7-c038e5dcc355"
+  },
+  "reversal_entries": [
+    {
+      "account_id": "6373b5f3-5f25-42d9-ae81-ade0fe2f7cc8",
+      "amount": "12.5000",
+      "debit_credit": "CREDIT"
+    },
+    {
+      "account_id": "4e19122f-90e6-4b94-92f6-50f4d7907496",
+      "amount": "0.5000",
+      "debit_credit": "DEBIT"
+    },
+    {
+      "account_id": "7bc9c5cd-fd42-485c-a1b4-930309f2d3c7",
+      "amount": "12.0000",
+      "debit_credit": "DEBIT"
+    }
+  ],
+  "reversal_transaction": [
+    {
+      "id": "93f97964-8303-4fe3-a577-097ac5e340e1",
+      "reference_id": "ff8b5743-6840-4aa6-a286-c2126a700cd3",
+      "status": "POSTED",
+      "type": "REVERSAL"
+    }
+  ],
+  "row_counts_after": {
+    "gateway_payment_receipts": 1,
+    "journal_entries": 6,
+    "payments": 1,
+    "refunds": 1,
+    "transactions": 2
+  },
+  "row_counts_before": {
+    "gateway_payment_receipts": 1,
+    "journal_entries": 3,
+    "payments": 1,
+    "refunds": 0,
+    "transactions": 1
+  }
+}

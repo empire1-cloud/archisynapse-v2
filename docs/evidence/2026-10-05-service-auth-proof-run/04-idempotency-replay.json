@@ -1,0 +1,23 @@
+{
+  "changed_amount_response": {
+    "detail": "Idempotency-Key was already used for a different request"
+  },
+  "changed_amount_same_key_status": 409,
+  "original_event_id": "evt_eb9195b32df24465",
+  "replay_event_id": "evt_eb9195b32df24465",
+  "replay_status": 201,
+  "row_counts_after": {
+    "gateway_payment_receipts": 1,
+    "journal_entries": 3,
+    "payments": 1,
+    "refunds": 0,
+    "transactions": 1
+  },
+  "row_counts_before": {
+    "gateway_payment_receipts": 1,
+    "journal_entries": 3,
+    "payments": 1,
+    "refunds": 0,
+    "transactions": 1
+  }
+}

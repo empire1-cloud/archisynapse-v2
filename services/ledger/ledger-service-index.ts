@@ -24,6 +24,9 @@ const logger = pino();
  * - DB_NAME: Database name (default: archisynapse)
  * - DB_USER: Database user (default: postgres)
  * - DB_PASSWORD: Database password
+ * - DATABASE_URL: PostgreSQL connection string (used when DB_HOST is not set)
+ * - ARCHISYNAPSE_SERVICE_AUTH / ARCHISYNAPSE_INBOUND_SERVICE_TOKENS(_FILE):
+ *   which internal services may call this one (see service-auth.ts)
  * - PORT: HTTP port (default: 3001)
  * - NODE_ENV: Environment (development/production)
  */
@@ -35,12 +38,19 @@ async function main() {
   logger.info(`Starting Ledger Service (${NODE_ENV})`);
 
   // Initialize database pool
+  // DB_HOST and friends when DB_HOST is set (existing setups unchanged);
+  // otherwise DATABASE_URL (what docker-compose sets); otherwise defaults.
+  const useUrl = !process.env.DB_HOST && !!process.env.DATABASE_URL;
   const pool = new Pool({
-    host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432', 10),
-    database: process.env.DB_NAME || 'archisynapse',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || '',
+    ...(useUrl
+      ? { connectionString: process.env.DATABASE_URL }
+      : {
+          host: process.env.DB_HOST || 'localhost',
+          port: parseInt(process.env.DB_PORT || '5432', 10),
+          database: process.env.DB_NAME || 'archisynapse',
+          user: process.env.DB_USER || 'postgres',
+          password: process.env.DB_PASSWORD || '',
+        }),
     max: 20,
     idleTimeoutMillis: 30000,
     connectionTimeoutMillis: 2000,
@@ -66,7 +76,7 @@ async function main() {
   // Start HTTP server
   const server = app.listen(PORT, () => {
     logger.info(
-      { nodeEnv: NODE_ENV, dbHost: process.env.DB_HOST || 'localhost' },
+      { nodeEnv: NODE_ENV, db: useUrl ? 'DATABASE_URL' : process.env.DB_HOST || 'localhost' },
       `Ledger Service listening on http://localhost:${PORT}`
     );
   });

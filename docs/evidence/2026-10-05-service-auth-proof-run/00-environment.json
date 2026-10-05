@@ -1,0 +1,45 @@
+{
+  "environment": "local proof run; processor = local Stripe test-API stand-in; no real card network; no money moved",
+  "git_commit": "12bdf9557d5805d98596a351caa62bcfd0551b77",
+  "health": {
+    "database": "healthy",
+    "dependencies": {
+      "analytics": "healthy",
+      "fraud": "healthy",
+      "ledger": "healthy",
+      "transaction": "healthy"
+    },
+    "merchant_key_encryption": "configured",
+    "receipt_signing": "configured",
+    "service": "archisynapse-gateway",
+    "status": "healthy",
+    "timestamp": "2026-10-05T10:37:57.167370+00:00"
+  },
+  "proof_key": {
+    "algorithm": "Ed25519",
+    "key_id": "receipt-proofrun-v1",
+    "public_key_b64": "q4R8En66zUQGGYOqaa9rriLc_hdE-l1mu6W3dYilLAA"
+  },
+  "started_at": "2026-10-05T10:37:57.003424+00:00",
+  "status": {
+    "claims": {
+      "certifications": [],
+      "fee_savings": "not measured",
+      "settlement_speed": "not measured",
+      "throughput": "not measured"
+    },
+    "processor": {
+      "adapter": "stripe_test",
+      "live_money": false,
+      "test_mode": true
+    },
+    "production_ready": false,
+    "receipt_signing": {
+      "algorithm": "Ed25519",
+      "configured": true,
+      "key_id": "receipt-proofrun-v1"
+    },
+    "service": "archisynapse-gateway",
+    "version": "0.3.0"
+  }
+}

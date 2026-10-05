@@ -23,6 +23,9 @@ from pathlib import Path
 import asyncpg
 import httpx
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from local_service_tokens import local_service_token_env  # noqa: E402
+
 sys.path.insert(0, os.path.dirname(__file__))
 from royalty_keys import generate_tenant_keypair, sign_with_private_key  # noqa: E402
 
@@ -45,13 +48,14 @@ N_CONCURRENT = 10
 
 
 def start_services():
+    tokens = local_service_token_env()
     env = {**os.environ, "DB_HOST": "127.0.0.1", "DB_PORT": "5432", "DB_NAME": "archisynapse",
            "DB_USER": "postgres", "DB_PASSWORD": "postgres", "LEDGER_SERVICE_URL": f"http://127.0.0.1:{LEDGER_PORT}"}
     ledger = subprocess.Popen([TSX, "ledger-service-index.ts"], cwd=str(LEDGER_DIR),
-                              env={**env, "PORT": str(LEDGER_PORT)},
+                              env={**env, **tokens["ledger"], "PORT": str(LEDGER_PORT)},
                               stdout=open("/tmp/conc-ledger.log", "w"), stderr=subprocess.STDOUT)
     transaction = subprocess.Popen([TSX, "transaction-service-index.ts"], cwd=str(TRANSACTION_DIR),
-                                    env={**env, "PORT": str(TRANSACTION_PORT)},
+                                    env={**env, **tokens["transaction"], "PORT": str(TRANSACTION_PORT)},
                                     stdout=open("/tmp/conc-transaction.log", "w"), stderr=subprocess.STDOUT)
     fraud_env = {**os.environ, "ARCHISYNAPSE_DATABASE_URL": "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/archisynapse", "ARCHISYNAPSE_PEPPER": "conc-pepper"}
     fraud_python = str(FRAUD_DIR / ".venv" / "bin" / "python3")
@@ -63,6 +67,7 @@ def start_services():
         **os.environ, "DATABASE_URL": DATABASE_URL, "TRANSACTION_SERVICE_URL": f"http://127.0.0.1:{TRANSACTION_PORT}",
         "FRAUD_SERVICE_URL": f"http://127.0.0.1:{FRAUD_PORT}", "ROYALTY_LOOP_ENABLED": "true",
         "ROYALTY_ADMIN_TOKEN": ADMIN_TOKEN, "ROYALTY_TEST_FIXTURES_ENABLED": "true",
+        **tokens["gateway"],
     }
     gateway = subprocess.Popen(
         [sys.executable, "-c", f"import uvicorn; uvicorn.run('main:app', host='127.0.0.1', port={GATEWAY_PORT}, log_level='warning')"],

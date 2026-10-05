@@ -14,6 +14,7 @@ import logging
 from typing import Optional, Dict, Any
 
 import httpx
+from service_auth import ledger_service_headers, transaction_service_headers
 
 from canonical_event import (
     CanonicalEvent,
@@ -179,7 +180,7 @@ class RevenueAssuranceOrchestrator:
         try:
             headers = {
                 "Content-Type": "application/json",
-                "X-Organization-ID": merchant_id,
+                **transaction_service_headers(merchant_id),
             }
             if idempotency_key:
                 headers["Idempotency-Key"] = idempotency_key
@@ -328,7 +329,7 @@ class RevenueAssuranceOrchestrator:
                 json=transaction_request,
                 headers={
                     "Content-Type": "application/json",
-                    "X-Organization-ID": event.merchant_id,
+                    **transaction_service_headers(event.merchant_id),
                     "Idempotency-Key": event.idempotency_key,
                 },
             )
@@ -352,7 +353,7 @@ class RevenueAssuranceOrchestrator:
             response = await self.client.get(
                 f"{self.ledger_base_url}/transactions",
                 params={"referenceId": event.transaction_id},
-                headers={"X-Organization-ID": merchant_id},
+                headers=ledger_service_headers(merchant_id),
             )
             if response.status_code == 200:
                 payload = response.json()

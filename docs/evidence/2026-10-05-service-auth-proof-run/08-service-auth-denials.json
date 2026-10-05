@@ -1,0 +1,114 @@
+{
+  "claim": "ledger and transaction services refuse callers without a valid service token; the gateway can read but not post to the ledger; refused calls write nothing; tokens never logged",
+  "organization_used": "mer_probe_9bb56658",
+  "cases": [
+    {
+      "case": "ledger read with only X-Organization-ID",
+      "method": "GET",
+      "path": "accounts",
+      "expected": 401,
+      "status": 401,
+      "passed": true
+    },
+    {
+      "case": "ledger post with only X-Organization-ID",
+      "method": "POST",
+      "path": "transactions",
+      "expected": 401,
+      "status": 401,
+      "passed": true
+    },
+    {
+      "case": "ledger account create with only X-Organization-ID",
+      "method": "POST",
+      "path": "accounts",
+      "expected": 401,
+      "status": 401,
+      "passed": true
+    },
+    {
+      "case": "ledger post with a made-up token",
+      "method": "POST",
+      "path": "transactions",
+      "expected": 401,
+      "status": 401,
+      "passed": true
+    },
+    {
+      "case": "gateway token posting to the ledger (read-only caller)",
+      "method": "POST",
+      "path": "transactions",
+      "expected": 403,
+      "status": 403,
+      "passed": true
+    },
+    {
+      "case": "gateway token reading the ledger",
+      "method": "GET",
+      "path": "accounts",
+      "expected": 200,
+      "status": 200,
+      "passed": true
+    },
+    {
+      "case": "payment with only X-Organization-ID",
+      "method": "POST",
+      "path": "payments",
+      "expected": 401,
+      "status": 401,
+      "passed": true
+    },
+    {
+      "case": "refund with only X-Organization-ID",
+      "method": "POST",
+      "path": "payments/fffee484-7d84-4041-9a19-9df9a94f113d/refund",
+      "expected": 401,
+      "status": 401,
+      "passed": true
+    },
+    {
+      "case": "payment with the transaction->ledger token (wrong hop)",
+      "method": "POST",
+      "path": "payments",
+      "expected": 401,
+      "status": 401,
+      "passed": true
+    },
+    {
+      "case": "royalty lookup with only X-Organization-ID",
+      "method": "GET",
+      "path": "royalties/evt_probe",
+      "expected": 401,
+      "status": 401,
+      "passed": true
+    }
+  ],
+  "row_counts_before": {
+    "journal_entries": 6,
+    "transactions": 2,
+    "accounts": 3,
+    "payments": 1
+  },
+  "row_counts_after": {
+    "journal_entries": 6,
+    "transactions": 2,
+    "accounts": 3,
+    "payments": 1
+  },
+  "rows_written_by_probe": {
+    "journal_entries": 0,
+    "transactions": 0,
+    "accounts": 0,
+    "payments": 0
+  },
+  "token_values_found_in_logs": [],
+  "logs_checked": [
+    "analytics.log",
+    "fraud.log",
+    "gateway.log",
+    "ledger.log",
+    "stripe.log",
+    "transaction.log"
+  ],
+  "passed": true
+}

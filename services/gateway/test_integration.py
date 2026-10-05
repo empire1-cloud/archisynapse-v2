@@ -11,6 +11,8 @@ from typing import Any, Dict, Optional
 
 import httpx
 
+from service_auth import ledger_service_headers, transaction_service_headers
+
 GATEWAY_URL = "http://127.0.0.1:9000"
 FRAUD_URL = "http://127.0.0.1:8082"
 TRANSACTION_URL = "http://127.0.0.1:3000"
@@ -79,7 +81,7 @@ class IntegrationHarness:
     async def get_transaction(self, transaction_id: str) -> Dict[str, Any]:
         response = await self.client.get(
             f"{TRANSACTION_URL}/payments/{transaction_id}",
-            headers={"X-Organization-ID": self.merchant_id},
+            headers=transaction_service_headers(self.merchant_id),
         )
         response.raise_for_status()
         return response.json()
@@ -87,7 +89,7 @@ class IntegrationHarness:
     async def get_ledger_transaction(self, transaction_id: str) -> Dict[str, Any]:
         response = await self.client.get(
             f"{LEDGER_URL}/transactions/{transaction_id}",
-            headers={"X-Organization-ID": self.merchant_id},
+            headers=ledger_service_headers(self.merchant_id),
         )
         response.raise_for_status()
         return response.json()
@@ -95,7 +97,7 @@ class IntegrationHarness:
     async def get_trial_balance(self) -> Dict[str, Any]:
         response = await self.client.get(
             f"{LEDGER_URL}/trial-balance",
-            headers={"X-Organization-ID": self.merchant_id},
+            headers=ledger_service_headers(self.merchant_id),
         )
         response.raise_for_status()
         return response.json()
