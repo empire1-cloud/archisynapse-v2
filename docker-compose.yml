@@ -33,6 +33,22 @@ services:
         condition: service_healthy
     restart: "no"
 
+  # One-shot setup: creates the internal service tokens once (kept in
+  # service_tokens_store, mounted only here) and gives each service a volume
+  # holding only what it needs. Lets the ledger and transaction services
+  # reject callers that are not the gateway or the transaction service.
+  # Exits when done; safe to run repeatedly. See docs/SERVICE_AUTH.md.
+  service-tokens:
+    image: alpine:3.20
+    volumes:
+      - service_tokens_store:/service-tokens/store
+      - service_tokens_gateway:/service-tokens/gateway
+      - service_tokens_transaction:/service-tokens/transaction
+      - service_tokens_ledger:/service-tokens/ledger
+      - ./infra/service-auth/generate_service_tokens.sh:/generate_service_tokens.sh:ro
+    command: ["sh", "/generate_service_tokens.sh"]
+    restart: "no"
+
   redis:
     image: redis:7-alpine
     ports:
@@ -60,11 +76,20 @@ services:
       STRIPE_API_BASE_URL: ${STRIPE_API_BASE_URL:-https://api.stripe.com/v1}
       ARCHISYNAPSE_LIVE_SMOKE_TEST_ENABLED: ${ARCHISYNAPSE_LIVE_SMOKE_TEST_ENABLED:-false}
       ARCHISYNAPSE_LIVE_SMOKE_TEST_CONFIRM: ${ARCHISYNAPSE_LIVE_SMOKE_TEST_CONFIRM:-}
+      LEDGER_SERVICE_URL: http://ledger-service:3001
+      # Only the gateway may call this service; it proves it with a token.
+      ARCHISYNAPSE_SERVICE_AUTH: ${ARCHISYNAPSE_SERVICE_AUTH:-enforce}
+      ARCHISYNAPSE_INBOUND_SERVICE_TOKENS_FILE: /run/service-tokens/inbound.tokens
+      ARCHISYNAPSE_TRANSACTION_TO_LEDGER_TOKEN_FILE: /run/service-tokens/transaction-to-ledger.token
+    volumes:
+      - service_tokens_transaction:/run/service-tokens:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      service-tokens:
+        condition: service_completed_successfully
 
   ledger-service:
     build:
@@ -78,11 +103,18 @@ services:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/archisynapse
       ARCHISYNAPSE_TENANT_ISOLATION: ${ARCHISYNAPSE_TENANT_ISOLATION:-enforce}
       REDIS_URL: redis://redis:6379
+      # Only the transaction service may write here; the gateway may only read.
+      ARCHISYNAPSE_SERVICE_AUTH: ${ARCHISYNAPSE_SERVICE_AUTH:-enforce}
+      ARCHISYNAPSE_INBOUND_SERVICE_TOKENS_FILE: /run/service-tokens/inbound.tokens
+    volumes:
+      - service_tokens_ledger:/run/service-tokens:ro
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+      service-tokens:
+        condition: service_completed_successfully
 
   fraud-service:
     build:
@@ -144,6 +176,10 @@ services:
       ROYALTY_LOOP_ENABLED: ${ROYALTY_LOOP_ENABLED:-false}
       ROYALTY_ADMIN_TOKEN: ${ROYALTY_ADMIN_TOKEN:-}
       ROYALTY_TEST_FIXTURES_ENABLED: ${ROYALTY_TEST_FIXTURES_ENABLED:-false}
+      ARCHISYNAPSE_GATEWAY_TO_TRANSACTION_TOKEN_FILE: /run/service-tokens/gateway-to-transaction.token
+      ARCHISYNAPSE_GATEWAY_TO_LEDGER_TOKEN_FILE: /run/service-tokens/gateway-to-ledger.token
+    volumes:
+      - service_tokens_gateway:/run/service-tokens:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -160,3 +196,7 @@ services:
 
 volumes:
   postgres_data:
+  service_tokens_store:
+  service_tokens_gateway:
+  service_tokens_transaction:
+  service_tokens_ledger:
