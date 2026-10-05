@@ -1,0 +1,158 @@
+name: Docker stack
+
+# Builds every image and starts the whole stack with `docker compose up`,
+# exactly as a developer would, then runs the end-to-end proof run and the
+# service-authentication probes against the containers.
+#
+# Processor: the local Stripe test-API stand-in (tools/proof-run). No Stripe
+# account, card network or money is involved. All keys are generated fresh
+# for each run and never leave the runner.
+
+on:
+  pull_request:
+    paths:
+      - "docker-compose.yml"
+      - "infra/**"
+      - "migrations/**"
+      - "services/**"
+      - "tools/proof-run/**"
+      - "package-lock.json"
+      - ".github/workflows/docker-stack.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "docker-compose.yml"
+      - "infra/**"
+      - "migrations/**"
+      - "services/**"
+      - "tools/proof-run/**"
+      - "package-lock.json"
+
+jobs:
+  compose-up:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install proof-run dependencies
+        run: python -m pip install -r services/gateway/requirements.txt psycopg2-binary
+
+      - name: Generate per-run keys (never stored)
+        run: |
+          gen() { python -c "import base64, os; print(base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip('='))"; }
+          for name in ARCHISYNAPSE_ADMIN_TOKEN ARCHISYNAPSE_GATEWAY_MASTER_KEY ARCHISYNAPSE_RECEIPT_SIGNING_PRIVATE_KEY ARCHISYNAPSE_PEPPER; do
+            value="$(gen)"
+            echo "::add-mask::${value}"
+            echo "${name}=${value}" >> "$GITHUB_ENV"
+          done
+          {
+            echo "PROOF_DIR=${RUNNER_TEMP}/docker-proof-run"
+            echo "ARCHISYNAPSE_RECEIPT_SIGNING_KEY_ID=receipt-ci-v1"
+            echo "ARCHISYNAPSE_PROCESSOR=stripe_test"
+            echo "STRIPE_SECRET_KEY=sk_test_ci_stand_in_not_a_real_key"
+            echo "STRIPE_API_BASE_URL=http://host.docker.internal:12111/v1"
+          } >> "$GITHUB_ENV"
+
+      - name: Let the transaction container reach the stand-in on the runner
+        run: |
+          cat > docker-compose.ci.yml <<'YAML'
+          services:
+            transaction-service:
+              extra_hosts:
+                - "host.docker.internal:host-gateway"
+          YAML
+
+      - name: Start the Stripe test-API stand-in
+        run: |
+          STRIPE_STAND_IN_HOST=0.0.0.0 nohup python tools/proof-run/stripe_stand_in.py > "${RUNNER_TEMP}/stand-in.log" 2>&1 &
+          for i in $(seq 1 20); do curl -s -o /dev/null http://127.0.0.1:12111/ && break; sleep 0.5; done
+
+      - name: docker compose up --build
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build
+
+      - name: Wait for every service to report healthy
+        run: |
+          for target in 3001/health 3000/health 8000/health 8081/health 9000/health; do
+            ok=0
+            for i in $(seq 1 90); do
+              if curl -fsS "http://127.0.0.1:${target}" > /dev/null 2>&1; then ok=1; echo "healthy: ${target}"; break; fi
+              sleep 2
+            done
+            if [ "${ok}" != 1 ]; then echo "NOT healthy: ${target}"; docker compose ps -a; exit 1; fi
+          done
+          curl -fsS http://127.0.0.1:9000/health
+
+      - name: One-shot setup services finished cleanly
+        run: |
+          docker compose ps -a
+          for svc in db-setup service-tokens; do
+            code="$(docker inspect -f '{{.State.ExitCode}}' "$(docker compose ps -aq "${svc}")")"
+            echo "${svc} exit code ${code}"
+            test "${code}" = 0
+          done
+
+      - name: Each service holds only its own tokens
+        run: |
+          echo "gateway:";     docker compose exec -T gateway ls /run/service-tokens
+          echo "transaction:"; docker compose exec -T transaction-service ls /run/service-tokens
+          echo "ledger:";      docker compose exec -T ledger-service ls /run/service-tokens
+          # The gateway must not hold the ledger write token.
+          docker compose exec -T gateway sh -c 'test ! -e /run/service-tokens/transaction-to-ledger.token'
+          # Receiving services hold only SHA-256 digests of their callers' tokens.
+          for svc in ledger-service transaction-service; do
+            docker compose exec -T "${svc}" sh -c \
+              '! grep -Ev "^[a-z][a-z0-9_-]*:(read|write):sha256:[0-9a-f]{64}$" /run/service-tokens/inbound.tokens'
+          done
+          docker compose exec -T ledger-service sh -c 'test ! -e /run/service-tokens/transaction-to-ledger.token'
+
+      - name: Proof run against the containers
+        run: >-
+          GATEWAY_DIR=services/gateway OUT_DIR="${PROOF_DIR}" GIT_COMMIT="${GITHUB_SHA}"
+          python tools/proof-run/proof_run.py
+
+      - name: Service-authentication probes against the containers
+        run: |
+          mkdir -p "${RUNNER_TEMP}/tokens" "${RUNNER_TEMP}/logs"
+          docker cp "$(docker compose ps -aq service-tokens):/service-tokens/store/." "${RUNNER_TEMP}/tokens/"
+          for svc in ledger-service transaction-service gateway fraud-service analytics-service; do
+            docker compose logs --no-color "${svc}" > "${RUNNER_TEMP}/logs/${svc}.log" 2>&1
+          done
+          OUT_DIR="${PROOF_DIR}" SERVICE_TOKEN_DIR="${RUNNER_TEMP}/tokens" LOG_DIR="${RUNNER_TEMP}/logs" \
+            python tools/proof-run/service_auth_probe.py
+
+      - name: Restart keeps the same tokens and still works
+        run: |
+          (cd "${RUNNER_TEMP}/tokens" && sha256sum *.token) > "${RUNNER_TEMP}/before.sha"
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --force-recreate service-tokens ledger-service transaction-service
+          for target in 3001/health 3000/health; do
+            for i in $(seq 1 60); do curl -fsS "http://127.0.0.1:${target}" > /dev/null 2>&1 && break; sleep 2; done
+          done
+          rm -rf "${RUNNER_TEMP}/tokens2" && mkdir -p "${RUNNER_TEMP}/tokens2"
+          docker cp "$(docker compose ps -aq service-tokens):/service-tokens/store/." "${RUNNER_TEMP}/tokens2/"
+          (cd "${RUNNER_TEMP}/tokens2" && sha256sum *.token) > "${RUNNER_TEMP}/after.sha"
+          diff "${RUNNER_TEMP}/before.sha" "${RUNNER_TEMP}/after.sha"
+          echo "tokens unchanged across restart"
+
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-proof-run
+          path: ${{ env.PROOF_DIR }}
+          if-no-files-found: ignore
+
+      - name: Stop the stack
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
