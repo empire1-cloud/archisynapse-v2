@@ -1,0 +1,24 @@
+{
+  "ledger_unchanged": true,
+  "responses": {
+    "forged_api_key": 401,
+    "merchant_b_reads_a_receipt": 404,
+    "merchant_b_refunds_a_payment": 404,
+    "missing_idempotency_key": 422,
+    "no_api_key": 401
+  },
+  "row_counts_after": {
+    "gateway_payment_receipts": 3,
+    "journal_entries": 3,
+    "payments": 1,
+    "refunds": 0,
+    "transactions": 1
+  },
+  "row_counts_before": {
+    "gateway_payment_receipts": 3,
+    "journal_entries": 3,
+    "payments": 1,
+    "refunds": 0,
+    "transactions": 1
+  }
+}
