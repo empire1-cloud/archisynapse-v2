@@ -80,6 +80,7 @@ jobs:
           python -m unittest discover -s tests -p "test_gateway_postgres_concurrency.py" -v
           python -m unittest discover -s tests -p "test_tenant_isolation_rls.py" -v
           python -m unittest discover -s tests -p "test_tenant_ledger_immutability.py" -v
+          python -m unittest discover -s tests -p "test_transaction_request_contract.py" -v
 
   transaction-node:
     runs-on: ubuntu-latest
