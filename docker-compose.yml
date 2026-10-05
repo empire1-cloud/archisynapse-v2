@@ -12,11 +12,26 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
+      - ./infra/postgres/zz_analytics_database.sql:/docker-entrypoint-initdb.d/zz_analytics_database.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  # One-shot setup: makes sure the analytics database exists on every start,
+  # for new and existing volumes. Exits when done; safe to run repeatedly.
+  db-setup:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: postgres
+    volumes:
+      - ./infra/postgres/ensure_analytics_database.sql:/ensure_analytics_database.sql:ro
+    command: ["psql", "-h", "postgres", "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-f", "/ensure_analytics_database.sql"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
 
   redis:
     image: redis:7-alpine
@@ -89,11 +104,15 @@ services:
     ports:
       - "8081:8081"
     environment:
-      ARCHISYNAPSE_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/archisynapse
+      # Own database: its `merchants` and `transactions` tables collide with
+      # the fraud service and the ledger. Created by the db-setup service.
+      ARCHISYNAPSE_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/archisynapse_analytics
       ARCHISYNAPSE_PEPPER: ${ARCHISYNAPSE_PEPPER:-dev-only-insecure-pepper}
     depends_on:
       postgres:
         condition: service_healthy
+      db-setup:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
