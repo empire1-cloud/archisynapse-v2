@@ -13,6 +13,8 @@ from typing import Optional
 
 import httpx
 
+from service_auth import transaction_service_headers
+
 TRANSACTION_SERVICE_URL = os.getenv("TRANSACTION_SERVICE_URL", "http://127.0.0.1:3000")
 
 
@@ -73,7 +75,7 @@ class RoyaltyTransactionClient:
                 "statusReasons": status_reasons,
                 "requestHash": request_hash,
             },
-            headers={"X-Organization-ID": organization_id},
+            headers=transaction_service_headers(organization_id),
         )
         if response.status_code == 409:
             raise RoyaltyIdempotencyConflict(response.text)
@@ -84,7 +86,7 @@ class RoyaltyTransactionClient:
     async def get_obligation(self, organization_id: str, event_id: str) -> Optional[dict]:
         response = await self.client.get(
             f"{self.base_url}/royalties/{event_id}",
-            headers={"X-Organization-ID": organization_id},
+            headers=transaction_service_headers(organization_id),
         )
         if response.status_code == 404:
             return None
@@ -95,7 +97,7 @@ class RoyaltyTransactionClient:
     async def release_obligation(self, organization_id: str, event_id: str, idempotency_key: str) -> dict:
         response = await self.client.post(
             f"{self.base_url}/royalties/{event_id}/release",
-            headers={"X-Organization-ID": organization_id, "Idempotency-Key": idempotency_key},
+            headers={**transaction_service_headers(organization_id), "Idempotency-Key": idempotency_key},
         )
         if response.status_code not in (200, 201):
             raise TransactionServiceError(response.status_code, response.text)
@@ -117,7 +119,7 @@ class RoyaltyTransactionClient:
                 "reversalIdempotencyKey": reversal_idempotency_key,
                 "reason": reason,
             },
-            headers={"X-Organization-ID": organization_id},
+            headers=transaction_service_headers(organization_id),
         )
         if response.status_code not in (200, 201):
             raise TransactionServiceError(response.status_code, response.text)

@@ -24,6 +24,7 @@ import asyncpg
 import httpx
 
 sys.path.insert(0, os.path.dirname(__file__))
+from local_service_tokens import local_service_token_env  # noqa: E402
 from royalty_keys import generate_tenant_keypair  # noqa: E402
 from royalty_outbox_simulator import LyricaOutboxSimulator  # noqa: E402
 
@@ -44,16 +45,21 @@ RUN_ID = uuid.uuid4().hex[:8]
 TENANT_ID = f"lyrica-at12-{RUN_ID}"
 
 
+# One set of tokens per run, shared by the dependency services and the
+# gateway (which this test restarts separately).
+SERVICE_TOKENS = local_service_token_env()
+
+
 def start_dependency_services():
     env = {
         **os.environ, "DB_HOST": "127.0.0.1", "DB_PORT": "5432", "DB_NAME": "archisynapse",
         "DB_USER": "postgres", "DB_PASSWORD": "postgres", "LEDGER_SERVICE_URL": f"http://127.0.0.1:{LEDGER_PORT}",
     }
     ledger = subprocess.Popen([TSX, "ledger-service-index.ts"], cwd=str(LEDGER_DIR),
-                              env={**env, "PORT": str(LEDGER_PORT)},
+                              env={**env, **SERVICE_TOKENS["ledger"], "PORT": str(LEDGER_PORT)},
                               stdout=open("/tmp/at12-ledger.log", "w"), stderr=subprocess.STDOUT)
     transaction = subprocess.Popen([TSX, "transaction-service-index.ts"], cwd=str(TRANSACTION_DIR),
-                                    env={**env, "PORT": str(TRANSACTION_PORT)},
+                                    env={**env, **SERVICE_TOKENS["transaction"], "PORT": str(TRANSACTION_PORT)},
                                     stdout=open("/tmp/at12-transaction.log", "w"), stderr=subprocess.STDOUT)
     fraud_env = {**os.environ, "ARCHISYNAPSE_DATABASE_URL": "postgresql+psycopg2://postgres:postgres@127.0.0.1:5432/archisynapse", "ARCHISYNAPSE_PEPPER": "at12-pepper"}
     fraud_python = str(FRAUD_DIR / ".venv" / "bin" / "python3")
@@ -73,6 +79,7 @@ def start_gateway():
         "ROYALTY_LOOP_ENABLED": "true",
         "ROYALTY_ADMIN_TOKEN": ADMIN_TOKEN,
         "ROYALTY_TEST_FIXTURES_ENABLED": "true",
+        **SERVICE_TOKENS["gateway"],
     }
     return subprocess.Popen(
         [sys.executable, "-c", f"import uvicorn; uvicorn.run('main:app', host='127.0.0.1', port={GATEWAY_PORT}, log_level='warning')"],

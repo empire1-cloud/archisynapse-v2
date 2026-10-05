@@ -133,6 +133,8 @@ start_ledger() {
     DB_USER="$DB_USER" \
     DB_PASSWORD="$DB_PASSWORD" \
     PORT="$LEDGER_PORT" \
+    ARCHISYNAPSE_SERVICE_AUTH=enforce \
+    ARCHISYNAPSE_INBOUND_SERVICE_TOKENS="gateway:read:${GATEWAY_TO_LEDGER_TOKEN},transaction:write:${TRANSACTION_TO_LEDGER_TOKEN}" \
     npx tsx ledger-service-index.ts
   ) &
   PIDS+=($!)
@@ -149,6 +151,9 @@ start_transaction() {
     DB_PASSWORD="$DB_PASSWORD" \
     PORT="$TRANSACTION_PORT" \
     LEDGER_SERVICE_URL="http://127.0.0.1:${LEDGER_PORT}" \
+    ARCHISYNAPSE_SERVICE_AUTH=enforce \
+    ARCHISYNAPSE_INBOUND_SERVICE_TOKENS="gateway:write:${GATEWAY_TO_TRANSACTION_TOKEN}" \
+    ARCHISYNAPSE_TRANSACTION_TO_LEDGER_TOKEN="$TRANSACTION_TO_LEDGER_TOKEN" \
     npx tsx transaction-service-index.ts
   ) &
   PIDS+=($!)
@@ -162,10 +167,18 @@ start_gateway() {
     TRANSACTION_SERVICE_URL="http://127.0.0.1:${TRANSACTION_PORT}" \
     LEDGER_SERVICE_URL="http://127.0.0.1:${LEDGER_PORT}" \
     ANALYTICS_SERVICE_URL="http://127.0.0.1:${ANALYTICS_PORT}" \
+    ARCHISYNAPSE_GATEWAY_TO_TRANSACTION_TOKEN="$GATEWAY_TO_TRANSACTION_TOKEN" \
+    ARCHISYNAPSE_GATEWAY_TO_LEDGER_TOKEN="$GATEWAY_TO_LEDGER_TOKEN" \
     ./.venv/bin/uvicorn main:app --host 127.0.0.1 --port "$GATEWAY_PORT"
   ) &
   PIDS+=($!)
 }
+
+# Fresh internal service tokens for this run (never written to disk).
+new_token() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
+GATEWAY_TO_TRANSACTION_TOKEN="$(new_token)"
+GATEWAY_TO_LEDGER_TOKEN="$(new_token)"
+TRANSACTION_TO_LEDGER_TOKEN="$(new_token)"
 
 main() {
   echo "=============================================================="

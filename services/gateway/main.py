@@ -10,6 +10,7 @@ from typing import Optional, Dict, Any
 from uuid import UUID, uuid4
 
 import httpx
+from service_auth import transaction_service_headers
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -186,7 +187,7 @@ async def refresh_receipt_state(receipt: UnifiedReceipt) -> UnifiedReceipt:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 f"{TRANSACTION_SERVICE_URL}/payments/{receipt.transaction_id}",
-                headers={"X-Organization-ID": receipt.merchant_id},
+                headers=transaction_service_headers(receipt.merchant_id),
             )
         if response.status_code == 200:
             payment = response.json()
