@@ -4,6 +4,7 @@ import pino from 'pino';
 import { initTransactionAPI } from './transaction-service-api';
 import { TransactionService } from './transaction-service-core';
 import { LedgerClient } from './transaction-service-ledger-client';
+import { outboundServiceToken } from './service-auth';
 import { initRoyaltyAPI } from './royalty-service-api';
 import { RoyaltyService } from './royalty-service-core';
 import { RoyaltyLedgerClient } from './royalty-service-ledger-client';
@@ -14,12 +15,19 @@ const PORT = parseInt(process.env.PORT || '3000', 10);
 async function main() {
   logger.info('Starting Transaction Service');
 
+  // DB_HOST and friends when DB_HOST is set (existing setups unchanged);
+  // otherwise DATABASE_URL (what docker-compose sets); otherwise defaults.
+  const useUrl = !process.env.DB_HOST && !!process.env.DATABASE_URL;
   const pool = new Pool({
-    host: process.env.DB_HOST || '127.0.0.1',
-    port: parseInt(process.env.DB_PORT || '5432', 10),
-    database: process.env.DB_NAME || 'archisynapse',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || 'postgres',
+    ...(useUrl
+      ? { connectionString: process.env.DATABASE_URL }
+      : {
+          host: process.env.DB_HOST || '127.0.0.1',
+          port: parseInt(process.env.DB_PORT || '5432', 10),
+          database: process.env.DB_NAME || 'archisynapse',
+          user: process.env.DB_USER || 'postgres',
+          password: process.env.DB_PASSWORD || 'postgres',
+        }),
     max: 20,
   });
 
@@ -31,6 +39,17 @@ async function main() {
   } catch (error) {
     logger.error(error, 'Failed to connect to database');
     process.exit(1);
+  }
+
+  // Surface a missing or unreadable ledger token at startup rather than on the
+  // first payment. The clients still re-read it on every call (rotation).
+  // An unreadable ARCHISYNAPSE_TRANSACTION_TO_LEDGER_TOKEN_FILE throws here and
+  // stops the service.
+  if (!outboundServiceToken('ARCHISYNAPSE_TRANSACTION_TO_LEDGER')) {
+    logger.warn(
+      'No ARCHISYNAPSE_TRANSACTION_TO_LEDGER_TOKEN(_FILE): ledger calls carry no service token ' +
+        'and an enforcing ledger will refuse them'
+    );
   }
 
   const ledgerClient = new LedgerClient(process.env.LEDGER_SERVICE_URL || 'http://127.0.0.1:3001');

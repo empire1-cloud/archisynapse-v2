@@ -1,5 +1,7 @@
 import { Decimal } from 'decimal.js';
 
+import { outboundServiceToken, serviceAuthHeaders } from './service-auth';
+
 /**
  * Ledger HTTP client for the royalty domain. Separate from the
  * card-payment LedgerClient (transaction-service-ledger-client.ts)
@@ -15,14 +17,34 @@ import { Decimal } from 'decimal.js';
  */
 export class RoyaltyLedgerClient {
   private baseUrl: string;
+  private serviceToken: string | null | undefined;
 
-  constructor(baseUrl: string = process.env.LEDGER_SERVICE_URL || 'http://localhost:3001') {
+  /**
+   * serviceToken proves to the ledger that this is the transaction service
+   * (service-auth.ts). When not passed, it is read on every call from
+   * ARCHISYNAPSE_TRANSACTION_TO_LEDGER_TOKEN or ..._TOKEN_FILE, so a rotated
+   * token file takes effect without a restart. Without one, an enforcing
+   * ledger rejects every call: fail closed.
+   */
+  constructor(
+    baseUrl: string = process.env.LEDGER_SERVICE_URL || 'http://localhost:3001',
+    serviceToken?: string | null
+  ) {
     this.baseUrl = baseUrl;
+    this.serviceToken = serviceToken;
+  }
+
+  private get authHeaders(): Record<string, string> {
+    return serviceAuthHeaders(
+      this.serviceToken !== undefined
+        ? this.serviceToken
+        : outboundServiceToken('ARCHISYNAPSE_TRANSACTION_TO_LEDGER')
+    );
   }
 
   private async listAccounts(organizationId: string): Promise<Array<{ id: string; code: string }>> {
     const res = await fetch(`${this.baseUrl}/accounts`, {
-      headers: { 'X-Organization-ID': organizationId },
+      headers: { ...this.authHeaders, 'X-Organization-ID': organizationId },
     });
     if (!res.ok) {
       throw new Error(`Ledger Service rejected account list: ${res.status} ${await res.text()}`);
@@ -38,7 +60,7 @@ export class RoyaltyLedgerClient {
   ): Promise<{ id: string }> {
     const res = await fetch(`${this.baseUrl}/accounts`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Organization-ID': organizationId },
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders, 'X-Organization-ID': organizationId },
       body: JSON.stringify({ code, name, type, currency: 'USD' }),
     });
     if (!res.ok) {
@@ -61,7 +83,7 @@ export class RoyaltyLedgerClient {
   ): Promise<{ id: string }> {
     const res = await fetch(`${this.baseUrl}/transactions`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Organization-ID': organizationId },
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders, 'X-Organization-ID': organizationId },
       body: JSON.stringify(body),
     });
     if (!res.ok) {
@@ -214,7 +236,7 @@ export class RoyaltyLedgerClient {
   ): Promise<{ id: string }> {
     const res = await fetch(`${this.baseUrl}/transactions/${originalLedgerTransactionId}/reverse`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Organization-ID': organizationId },
+      headers: { 'Content-Type': 'application/json', ...this.authHeaders, 'X-Organization-ID': organizationId },
       body: JSON.stringify({ reason }),
     });
     if (!res.ok) {

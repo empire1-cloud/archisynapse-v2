@@ -1,10 +1,15 @@
-import express, { Request, Response, NextFunction } from 'express';
+import express, { Request, RequestHandler, Response, NextFunction } from 'express';
 import { Decimal } from 'decimal.js';
 import pino from 'pino';
 import pinoHttp from 'pino-http';
 import Joi from 'joi';
 
 import { TransactionService } from './transaction-service-core';
+import {
+  ServiceAuthConfig,
+  createServiceAuthMiddleware,
+  serviceAuthFromEnv,
+} from './service-auth';
 import {
   PaymentMethodType,
   PaymentStatus,
@@ -13,13 +18,38 @@ import {
   InsufficientFundsError,
 } from './transaction-service-types';
 
-const logger = pino();
+// pino-http logs request headers. Never write the service token (or any
+// other credential header) to the logs.
+const logger = pino({
+  redact: {
+    paths: ['req.headers.authorization', 'req.headers.cookie', 'req.headers["x-api-key"]'],
+    censor: '[redacted]',
+  },
+});
 const app = express();
 
-app.use(express.json());
 app.use(pinoHttp({ logger }));
 
-// Auth middleware (stub: replace with real auth)
+// Service authentication runs first: the caller must prove which internal
+// service it is before X-Organization-ID is trusted (service-auth.ts).
+// Until initTransactionAPI configures it, every non-health request is refused.
+// Covers the royalty routes too: they are mounted on this same app.
+let serviceAuth: RequestHandler | null = null;
+app.use((req: Request, res: Response, next: NextFunction) => {
+  if (serviceAuth) {
+    return serviceAuth(req, res, next);
+  }
+  if (req.path === '/health' || req.path === '/ready') {
+    return next();
+  }
+  return res.status(503).json({ error: 'Service authentication not configured' });
+});
+
+// Bodies are parsed only after the caller is authenticated, so an
+// unauthenticated request cannot make the service parse or log anything.
+app.use(express.json());
+
+// Organization context. Trusted only after service authentication above.
 const authenticateOrg = (req: Request, res: Response, next: NextFunction) => {
   if (req.path === '/health' || req.path === '/ready') {
     return next();
@@ -42,7 +72,12 @@ const authenticateOrg = (req: Request, res: Response, next: NextFunction) => {
 
 app.use(authenticateOrg);
 
-export function initTransactionAPI(transactionService: TransactionService) {
+export function initTransactionAPI(
+  transactionService: TransactionService,
+  options: { serviceAuth?: ServiceAuthConfig } = {}
+) {
+  serviceAuth = createServiceAuthMiddleware(options.serviceAuth ?? serviceAuthFromEnv());
+
   /**
    * POST /payments
    * Create and process a payment. Idempotent via required Idempotency-Key header
