@@ -37,6 +37,60 @@ LEDGER_SERVICE_URL = os.getenv("LEDGER_SERVICE_URL", "http://127.0.0.1:3001")
 ANALYTICS_SERVICE_URL = os.getenv("ANALYTICS_SERVICE_URL", "http://127.0.0.1:8081")
 
 
+
+def _uuid_or_none(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    try:
+        return str(uuid.UUID(str(value)))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def build_transaction_request(event: CanonicalEvent, request: PaymentRequest) -> Dict[str, Any]:
+    """Build the transaction-service payment body.
+
+    Matches the transaction service contract (transaction-service-api.ts):
+    - customerId must be a UUID. A merchant's own customer reference that is
+      not a UUID is carried in metadata.customer_ref instead of failing the
+      payment after fraud scoring.
+    - paymentMethod.last4 must be exactly 4 characters and brand non-empty
+      when present, so empty values are omitted rather than sent.
+    """
+    fee_str = f"{event.fee_dollars:.2f}"
+    payment_method: Dict[str, Any] = {
+        "type": event.payment_method_type,
+        "token": request.payment_method_token,
+    }
+    last4 = (event.payment_method_last4 or "").strip()
+    if len(last4) == 4:
+        payment_method["last4"] = last4
+    brand = (event.payment_method_brand or "").strip()
+    if brand:
+        payment_method["brand"] = brand
+
+    transaction_request: Dict[str, Any] = {
+        "amount": f"{event.amount_dollars:.2f}",
+        "feeAmount": fee_str,
+        "currency": event.currency,
+        "paymentMethod": payment_method,
+        "metadata": {
+            **request.metadata,
+            "customer_ref": event.customer_id,
+            "correlation_id": event.correlation_id,
+            "event_id": event.event_id,
+            "fraud_decision": event.fraud_decision,
+            "fraud_score": event.fraud_score,
+            "processor_fee_amount": fee_str,
+        },
+    }
+    customer_uuid = _uuid_or_none(event.customer_id)
+    if customer_uuid:
+        transaction_request["customerId"] = customer_uuid
+    if request.description:
+        transaction_request["description"] = request.description
+    return transaction_request
+
 class RevenueAssuranceOrchestrator:
     def __init__(self):
         self.client = httpx.AsyncClient(timeout=30.0)
@@ -266,30 +320,7 @@ class RevenueAssuranceOrchestrator:
             event.fraud_error = f"Service unavailable: {exc}"
 
     async def _process_transaction(self, event: CanonicalEvent, request: PaymentRequest) -> None:
-        amount_str = f"{event.amount_dollars:.2f}"
-        fee_str = f"{event.fee_dollars:.2f}"
-        transaction_request = {
-            "customerId": event.customer_id,
-            "amount": amount_str,
-            "feeAmount": fee_str,
-            "currency": event.currency,
-            "paymentMethod": {
-                "type": event.payment_method_type,
-                "token": request.payment_method_token,
-                "last4": event.payment_method_last4,
-                "brand": event.payment_method_brand,
-            },
-            "metadata": {
-                **request.metadata,
-                "correlation_id": event.correlation_id,
-                "event_id": event.event_id,
-                "fraud_decision": event.fraud_decision,
-                "fraud_score": event.fraud_score,
-                "processor_fee_amount": fee_str,
-            },
-        }
-        if request.description:
-            transaction_request["description"] = request.description
+        transaction_request = build_transaction_request(event, request)
 
         try:
             response = await self.client.post(
