@@ -1,0 +1,45 @@
+{
+  "offline_verify": [
+    true,
+    "receipt signature is valid"
+  ],
+  "stored_receipt": {
+    "_proof": {
+      "algorithm": "Ed25519",
+      "key_id": "receipt-proofrun-v1",
+      "payload_sha256": "7ec1c8bbecd840ac647b7c97bfa4e709c2fe44ab451aafaf5519f9ef6760debe",
+      "public_key_b64": "q4R8En66zUQGGYOqaa9rriLc_hdE-l1mu6W3dYilLAA",
+      "signature_b64": "CG7OE_OswVUXCsT2s_3IBCHR-Fm5_QpNtoE9RA_5qay2NvwyHbjl0agWHCr5imp7_FDpU751isKegFw7Yg3cCA"
+    },
+    "amount": 12.5,
+    "analytics_error": null,
+    "analytics_recorded": true,
+    "analytics_transaction_id": "1",
+    "correlation_id": "corr_be7587adaf2840a4",
+    "currency": "USD",
+    "customer_id": "bf93a40a-e597-4c52-a15e-fd8dcdc75716",
+    "economic_truth_action_id": null,
+    "economic_truth_authorization_receipt_id": null,
+    "error": null,
+    "event_id": "evt_eb9195b32df24465",
+    "fee_amount": 0.5,
+    "fraud_decision": "approve",
+    "fraud_error": null,
+    "fraud_reasons": [],
+    "fraud_score": 0.0,
+    "idempotency_key": "proof-pay-1dd1ef98",
+    "ledger_entries": [],
+    "ledger_error": null,
+    "ledger_transaction_id": "ff8b5743-6840-4aa6-a286-c2126a700cd3",
+    "merchant_id": "mer_b83c8f8ea70ac69cc7d92f23",
+    "occurred_at": "2026-10-05T10:37:57.609569+00:00",
+    "processed_at": null,
+    "status": "completed",
+    "transaction_error": null,
+    "transaction_id": "263df76d-997c-4e41-aaf7-c038e5dcc355"
+  },
+  "tampered_amount_verify": [
+    false,
+    "receipt payload hash does not match proof"
+  ]
+}
