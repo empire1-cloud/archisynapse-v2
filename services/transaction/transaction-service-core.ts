@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from 'uuid';
 import pino from 'pino';
 
 import { LedgerClient } from './transaction-service-ledger-client';
+import { openTenantSession, tenantIsolationFromEnv, tenantQuery } from './tenant-session';
 import {
   Payment,
   PaymentStatus,
@@ -45,17 +46,29 @@ export class TransactionService {
   private ledgerClient: LedgerClient;
   private ledgerAccounts: LedgerAccountConfig;
   private processor: PaymentProcessor;
+  private tenantIsolation: boolean;
 
   constructor(
     pool: Pool,
     ledgerClient: LedgerClient,
     ledgerAccounts: LedgerAccountConfig,
-    processor: PaymentProcessor = buildProcessorFromEnv()
+    processor: PaymentProcessor = buildProcessorFromEnv(),
+    options: { tenantIsolation?: boolean } = {}
   ) {
     this.pool = pool;
     this.ledgerClient = ledgerClient;
     this.ledgerAccounts = ledgerAccounts;
     this.processor = processor;
+    this.tenantIsolation = options.tenantIsolation ?? tenantIsolationFromEnv();
+  }
+
+  /** Connection scoped to one organization (row-level security). */
+  private openSession(organizationId: string) {
+    return openTenantSession(this.pool, organizationId, this.tenantIsolation);
+  }
+
+  private query(organizationId: string, text: string, params: unknown[]) {
+    return tenantQuery(this.pool, organizationId, this.tenantIsolation, text, params);
   }
 
   getProcessorHealth() {
@@ -63,7 +76,8 @@ export class TransactionService {
   }
 
   async createPayment(req: CreatePaymentRequest): Promise<Payment> {
-    const client = await this.pool.connect();
+    const session = await this.openSession(req.organizationId);
+    const client = session.client;
     try {
       const existing = await client.query(
         `SELECT * FROM payments WHERE idempotency_key = $1`,
@@ -211,12 +225,18 @@ export class TransactionService {
 
       return this.getPayment(req.organizationId, paymentId);
     } finally {
-      client.release();
+      await session.close();
     }
   }
 
   async refundPayment(req: RefundRequest): Promise<Refund> {
-    const client = await this.pool.connect();
+    if (!req.organizationId) {
+      // Every API route passes the caller's organization. Without it the
+      // refund cannot be scoped, so it is refused rather than run unscoped.
+      throw new PaymentNotFoundError();
+    }
+    const session = await this.openSession(req.organizationId);
+    const client = session.client;
     try {
       const existing = await client.query(
         `SELECT * FROM refunds WHERE idempotency_key = $1`,
@@ -225,8 +245,8 @@ export class TransactionService {
       if (existing.rows.length > 0) return this.rowToRefund(existing.rows[0]);
 
       const paymentResult = await client.query(
-        `SELECT * FROM payments WHERE id = $1`,
-        [req.paymentId]
+        `SELECT * FROM payments WHERE id = $1 AND organization_id = $2`,
+        [req.paymentId, req.organizationId]
       );
       if (paymentResult.rows.length === 0) throw new PaymentNotFoundError();
       const payment = this.rowToPayment(paymentResult.rows[0]);
@@ -406,12 +426,12 @@ export class TransactionService {
       );
       return this.rowToRefund(saved.rows[0]);
     } finally {
-      client.release();
+      await session.close();
     }
   }
 
   async getPayment(organizationId: string, paymentId: string): Promise<Payment> {
-    const result = await this.pool.query(
+    const result = await this.query(organizationId,
       `SELECT * FROM payments WHERE id = $1 AND organization_id = $2`,
       [paymentId, organizationId]
     );
@@ -438,7 +458,7 @@ export class TransactionService {
 
     params.push(limit + 1);
     query += ` ORDER BY created_at DESC, id DESC LIMIT $${params.length}`;
-    const result = await this.pool.query(query, params);
+    const result = await this.query(organizationId, query, params);
     const hasMore = result.rows.length > limit;
     const rows = hasMore ? result.rows.slice(0, limit) : result.rows;
     return {
@@ -448,7 +468,7 @@ export class TransactionService {
   }
 
   async findUnpostedPayments(organizationId: string): Promise<Payment[]> {
-    const result = await this.pool.query(
+    const result = await this.query(organizationId,
       `SELECT * FROM payments
         WHERE organization_id = $1 AND status = 'SUCCEEDED'
           AND ledger_transaction_id IS NULL
