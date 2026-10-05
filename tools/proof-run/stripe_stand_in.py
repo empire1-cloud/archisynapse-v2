@@ -1,6 +1,6 @@
 """Local stand-in for the Stripe test API. Not Stripe. Used only to exercise
 Archisynapse's StripeTestProcessor code path without a Stripe key."""
-import json, uuid
+import json, os, uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs
 
@@ -24,4 +24,6 @@ class H(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(out))); self.end_headers(); self.wfile.write(out)
     def log_message(self, *a): pass
 
-HTTPServer(("127.0.0.1", 12111), H).serve_forever()
+# Loopback by default. The Docker CI job sets STRIPE_STAND_IN_HOST=0.0.0.0 so
+# the transaction-service container can reach it.
+HTTPServer((os.environ.get("STRIPE_STAND_IN_HOST", "127.0.0.1"), 12111), H).serve_forever()
