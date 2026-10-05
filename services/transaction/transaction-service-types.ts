@@ -61,6 +61,8 @@ export interface CreatePaymentRequest {
 }
 
 export interface RefundRequest {
+  /** The caller's organization. Refunds are only allowed on its own payments. */
+  organizationId?: string;
   paymentId: string;
   amount?: Decimal; // Partial refund if specified; full refund otherwise
   reason: string;

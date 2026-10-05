@@ -18,6 +18,7 @@ import {
   Discrepancy,
   AuditAction,
 } from './ledger-service-types';
+import { openTenantSession, tenantIsolationFromEnv, tenantQuery } from './tenant-session';
 
 const logger = pino();
 
@@ -33,9 +34,20 @@ const logger = pino();
  */
 export class LedgerService {
   private pool: Pool;
+  private tenantIsolation: boolean;
 
-  constructor(pool: Pool) {
+  constructor(pool: Pool, options: { tenantIsolation?: boolean } = {}) {
     this.pool = pool;
+    this.tenantIsolation = options.tenantIsolation ?? tenantIsolationFromEnv();
+  }
+
+  /** Connection scoped to one organization (row-level security). */
+  private openSession(organizationId: string) {
+    return openTenantSession(this.pool, organizationId, this.tenantIsolation);
+  }
+
+  private query(organizationId: string, text: string, params: unknown[]) {
+    return tenantQuery(this.pool, organizationId, this.tenantIsolation, text, params);
   }
 
   /**
@@ -50,7 +62,8 @@ export class LedgerService {
     currency: string = 'USD',
     metadata?: Record<string, unknown>
   ): Promise<Account> {
-    const client = await this.pool.connect();
+    const session = await this.openSession(organizationId);
+    const client = session.client;
     try {
       const id = uuidv4();
 
@@ -77,12 +90,12 @@ export class LedgerService {
       logger.info({ accountId: account.id, code }, 'Account created');
       return account;
     } finally {
-      client.release();
+      await session.close();
     }
   }
 
   async listAccounts(organizationId: string): Promise<Account[]> {
-    const result = await this.pool.query(
+    const result = await this.query(organizationId,
       `SELECT id, organization_id, code, name, type, balance, currency, is_active, metadata, created_at, updated_at
        FROM accounts
        WHERE organization_id = $1
@@ -102,131 +115,112 @@ export class LedgerService {
    * Returns the posted transaction with all its entries, or throws if validation fails.
    */
   async postTransaction(req: PostTransactionRequest): Promise<Transaction> {
-    const client = await this.pool.connect();
+    const session = await this.openSession(req.organizationId);
+    const client = session.client;
     try {
       await client.query('BEGIN');
+      const transaction = await this.postWithClient(client, req);
+      await client.query('COMMIT');
+      return transaction;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      logger.error({ error, req }, 'Failed to post transaction');
+      throw error;
+    } finally {
+      await session.close();
+    }
+  }
 
-      // 1. Idempotency check: if same key already posted, return stored result
-      if (req.idempotencyKey) {
-        const idempotentResult = await this.checkIdempotency(client, req.idempotencyKey);
-        if (idempotentResult) {
-          logger.info(
-            { idempotencyKey: req.idempotencyKey },
-            'Transaction already posted, returning cached result'
-          );
-          return idempotentResult;
-        }
-      }
-
-      // 2. Validate the transaction balances (all debits = all credits)
-      if (!this.validateTransactionBalance(req.entries)) {
-        throw new Error(
-          `Transaction does not balance. Debits must equal credits.`
+  /**
+   * Post inside a transaction the caller already opened on `client`.
+   * Used by postTransaction and by reverseTransaction, so a reversal and the
+   * status change on the original commit or roll back together.
+   */
+  private async postWithClient(client: PoolClient, req: PostTransactionRequest): Promise<Transaction> {
+    // 1. Idempotency check: if same key already posted, return stored result
+    if (req.idempotencyKey) {
+      const idempotentResult = await this.checkIdempotency(client, req.idempotencyKey);
+      if (idempotentResult) {
+        logger.info(
+          { idempotencyKey: req.idempotencyKey },
+          'Transaction already posted, returning cached result'
         );
+        return idempotentResult;
+      }
+    }
+
+    // 2. Validate the transaction balances (all debits = all credits)
+    if (!this.validateTransactionBalance(req.entries)) {
+      throw new Error(
+        `Transaction does not balance. Debits must equal credits.`
+      );
+    }
+
+    // 3. Create the transaction record
+    const transactionId = uuidv4();
+    const now = new Date();
+
+    await client.query(
+      `INSERT INTO transactions (id, organization_id, type, reference_id, description, amount, currency, status, idempotency_key, metadata, posted_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        transactionId,
+        req.organizationId,
+        req.type,
+        req.referenceId || null,
+        req.description,
+        req.amount.toString(),
+        req.currency,
+        TransactionStatus.POSTED,
+        req.idempotencyKey || null,
+        JSON.stringify(req.metadata || {}),
+        now,
+      ]
+    );
+
+    // 4. Create journal entries (immutable ledger lines)
+    const entries: JournalEntry[] = [];
+    for (const entryReq of req.entries) {
+      const entryId = uuidv4();
+
+      // Verify account exists and belongs to the organization
+      const accountCheck = await client.query(
+        `SELECT id FROM accounts WHERE id = $1 AND organization_id = $2`,
+        [entryReq.accountId, req.organizationId]
+      );
+
+      if (accountCheck.rows.length === 0) {
+        throw new Error(`Account ${entryReq.accountId} not found or does not belong to this organization`);
       }
 
-      // 3. Create the transaction record
-      const transactionId = uuidv4();
-      const now = new Date();
-
-      await client.query(
-        `INSERT INTO transactions (id, organization_id, type, reference_id, description, amount, currency, status, idempotency_key, metadata, posted_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      const entryResult = await client.query(
+        `INSERT INTO journal_entries (id, transaction_id, organization_id, account_id, debit_credit, amount, description, metadata)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         RETURNING id, transaction_id, organization_id, account_id, debit_credit, amount, description, metadata, created_at`,
         [
+          entryId,
           transactionId,
           req.organizationId,
-          req.type,
-          req.referenceId || null,
-          req.description,
-          req.amount.toString(),
-          req.currency,
-          TransactionStatus.POSTED,
-          req.idempotencyKey || null,
-          JSON.stringify(req.metadata || {}),
-          now,
+          entryReq.accountId,
+          entryReq.debitCredit,
+          entryReq.amount.toString(),
+          entryReq.description,
+          JSON.stringify(entryReq.metadata || {}),
         ]
       );
 
-      // 4. Create journal entries (immutable ledger lines)
-      const entries: JournalEntry[] = [];
-      for (const entryReq of req.entries) {
-        const entryId = uuidv4();
+      entries.push(this.rowToJournalEntry(entryResult.rows[0]));
+    }
 
-        // Verify account exists and belongs to the organization
-        const accountCheck = await client.query(
-          `SELECT id FROM accounts WHERE id = $1 AND organization_id = $2`,
-          [entryReq.accountId, req.organizationId]
-        );
+    // 5. Verify the transaction is still balanced (sanity check)
+    const isBalanced = await this.verifyTransactionBalance(client, transactionId);
+    if (!isBalanced) {
+      throw new Error('Transaction validation failed after insert (database state corruption detected)');
+    }
 
-        if (accountCheck.rows.length === 0) {
-          throw new Error(`Account ${entryReq.accountId} not found or does not belong to this organization`);
-        }
-
-        const entryResult = await client.query(
-          `INSERT INTO journal_entries (id, transaction_id, organization_id, account_id, debit_credit, amount, description, metadata)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-           RETURNING id, transaction_id, organization_id, account_id, debit_credit, amount, description, metadata, created_at`,
-          [
-            entryId,
-            transactionId,
-            req.organizationId,
-            entryReq.accountId,
-            entryReq.debitCredit,
-            entryReq.amount.toString(),
-            entryReq.description,
-            JSON.stringify(entryReq.metadata || {}),
-          ]
-        );
-
-        entries.push(this.rowToJournalEntry(entryResult.rows[0]));
-      }
-
-      // 5. Verify the transaction is still balanced (sanity check)
-      const isBalanced = await this.verifyTransactionBalance(client, transactionId);
-      if (!isBalanced) {
-        throw new Error('Transaction validation failed after insert (database state corruption detected)');
-      }
-
-      // 6. Store idempotency response
-      if (req.idempotencyKey) {
-        const transaction: Transaction = {
-          id: transactionId,
-          organizationId: req.organizationId,
-          type: req.type,
-          referenceId: req.referenceId,
-          description: req.description,
-          amount: req.amount,
-          currency: req.currency,
-          status: TransactionStatus.POSTED,
-          entries,
-          metadata: req.metadata,
-          postedAt: now,
-          createdAt: now,
-          updatedAt: now,
-        };
-
-        await this.storeIdempotencyResponse(client, req.idempotencyKey, req, transaction);
-      }
-
-      // 7. Audit log
-      await this.auditLog(
-        client,
-        req.organizationId,
-        AuditAction.POST,
-        'TRANSACTION',
-        transactionId,
-        null,
-        { transactionId, entryCount: entries.length }
-      );
-
-      await client.query('COMMIT');
-
-      logger.info(
-        { transactionId, type: req.type, amount: req.amount.toString(), entryCount: entries.length },
-        'Transaction posted successfully'
-      );
-
-      return {
+    // 6. Store idempotency response
+    if (req.idempotencyKey) {
+      const transaction: Transaction = {
         id: transactionId,
         organizationId: req.organizationId,
         type: req.type,
@@ -241,13 +235,41 @@ export class LedgerService {
         createdAt: now,
         updatedAt: now,
       };
-    } catch (error) {
-      await client.query('ROLLBACK');
-      logger.error({ error, req }, 'Failed to post transaction');
-      throw error;
-    } finally {
-      client.release();
+
+      await this.storeIdempotencyResponse(client, req.idempotencyKey, req, transaction);
     }
+
+    // 7. Audit log
+    await this.auditLog(
+      client,
+      req.organizationId,
+      AuditAction.POST,
+      'TRANSACTION',
+      transactionId,
+      null,
+      { transactionId, entryCount: entries.length }
+    );
+
+    logger.info(
+      { transactionId, type: req.type, amount: req.amount.toString(), entryCount: entries.length },
+      'Transaction posted successfully'
+    );
+
+    return {
+      id: transactionId,
+      organizationId: req.organizationId,
+      type: req.type,
+      referenceId: req.referenceId,
+      description: req.description,
+      amount: req.amount,
+      currency: req.currency,
+      status: TransactionStatus.POSTED,
+      entries,
+      metadata: req.metadata,
+      postedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
   }
 
   /**
@@ -261,7 +283,8 @@ export class LedgerService {
     transactionId: string,
     reason: string
   ): Promise<Transaction> {
-    const client = await this.pool.connect();
+    const session = await this.openSession(organizationId);
+    const client = session.client;
     try {
       await client.query('BEGIN');
 
@@ -300,7 +323,7 @@ export class LedgerService {
       }));
 
       // Post the reversal transaction
-      const reversalTxn = await this.postTransaction({
+      const reversalTxn = await this.postWithClient(client, {
         organizationId,
         type: TransactionType.REVERSAL,
         referenceId: transactionId,
@@ -324,12 +347,12 @@ export class LedgerService {
       logger.error({ error, transactionId }, 'Failed to reverse transaction');
       throw error;
     } finally {
-      client.release();
+      await session.close();
     }
   }
 
   async getTransaction(organizationId: string, transactionId: string): Promise<Transaction> {
-    const txnResult = await this.pool.query(
+    const txnResult = await this.query(organizationId,
       `SELECT id, organization_id, type, reference_id, description, amount, currency, status, metadata, posted_at, created_at, updated_at
        FROM transactions
        WHERE id = $1 AND organization_id = $2`,
@@ -340,7 +363,7 @@ export class LedgerService {
       throw new Error(`Transaction ${transactionId} not found`);
     }
 
-    const entryResult = await this.pool.query(
+    const entryResult = await this.query(organizationId,
       `SELECT id, transaction_id, organization_id, account_id, debit_credit, amount, description, metadata, created_at
        FROM journal_entries
        WHERE transaction_id = $1
@@ -371,6 +394,9 @@ export class LedgerService {
    * Trial balance should always sum to zero if the ledger is correct.
    */
   async getTrialBalance(organizationId: string): Promise<TrialBalance[]> {
+    // Reads the trial_balance view. Views run with their owner's rights and
+    // would bypass row-level security, so the tenant role has no grant on it;
+    // this read stays on the owner connection, filtered by organization.
     const result = await this.pool.query(
       `SELECT account_id, account_code, account_name, debit_sum, credit_sum, balance
        FROM trial_balance
@@ -404,7 +430,7 @@ export class LedgerService {
     // Find transactions with unbalanced entries
     const discrepancies: Discrepancy[] = [];
 
-    const result = await this.pool.query(
+    const result = await this.query(organizationId,
       `SELECT
          t.id,
          t.description,
@@ -429,7 +455,7 @@ export class LedgerService {
     }
 
     // Count total and balanced transactions
-    const txnResult = await this.pool.query(
+    const txnResult = await this.query(organizationId,
       `SELECT COUNT(*) as total, 
               SUM(CASE WHEN status = 'POSTED' THEN 1 ELSE 0 END) as posted
        FROM transactions

@@ -164,6 +164,7 @@ export function initTransactionAPI(transactionService: TransactionService) {
         (req.headers['idempotency-key'] as string) || `refund-${req.params.id as string}-${Date.now()}`;
 
       const refund = await transactionService.refundPayment({
+        organizationId: (req as any).organizationId,
         paymentId: req.params.id as string,
         amount: value.amount ? new Decimal(value.amount) : undefined,
         reason: value.reason,
