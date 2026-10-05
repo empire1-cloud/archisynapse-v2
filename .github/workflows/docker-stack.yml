@@ -58,22 +58,25 @@ jobs:
             echo "ARCHISYNAPSE_RECEIPT_SIGNING_KEY_ID=receipt-ci-v1"
             echo "ARCHISYNAPSE_PROCESSOR=stripe_test"
             echo "STRIPE_SECRET_KEY=sk_test_ci_stand_in_not_a_real_key"
-            echo "STRIPE_API_BASE_URL=http://host.docker.internal:12111/v1"
+            echo "STRIPE_API_BASE_URL=http://127.0.0.1:12111/v1"
           } >> "$GITHUB_ENV"
 
-      - name: Let the transaction container reach the stand-in on the runner
+      - name: Run the Stripe test-API stand-in inside the transaction container's network
+        # The processor only accepts HTTPS or http://127.0.0.1 (a deliberate
+        # safety rule). A sidecar sharing the transaction-service network
+        # namespace serves the stand-in on that container's 127.0.0.1.
         run: |
           cat > docker-compose.ci.yml <<'YAML'
           services:
-            transaction-service:
-              extra_hosts:
-                - "host.docker.internal:host-gateway"
+            stripe-stand-in:
+              image: python:3.12-slim
+              network_mode: "service:transaction-service"
+              depends_on:
+                - transaction-service
+              volumes:
+                - ./tools/proof-run/stripe_stand_in.py:/stripe_stand_in.py:ro
+              command: ["python", "/stripe_stand_in.py"]
           YAML
-
-      - name: Start the Stripe test-API stand-in
-        run: |
-          STRIPE_STAND_IN_HOST=0.0.0.0 nohup python tools/proof-run/stripe_stand_in.py > "${RUNNER_TEMP}/stand-in.log" 2>&1 &
-          for i in $(seq 1 20); do curl -s -o /dev/null http://127.0.0.1:12111/ && break; sleep 0.5; done
 
       - name: docker compose up --build
         run: docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --build
@@ -131,7 +134,7 @@ jobs:
       - name: Restart keeps the same tokens and still works
         run: |
           (cd "${RUNNER_TEMP}/tokens" && sha256sum *.token) > "${RUNNER_TEMP}/before.sha"
-          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --force-recreate service-tokens ledger-service transaction-service
+          docker compose -f docker-compose.yml -f docker-compose.ci.yml up -d --force-recreate service-tokens ledger-service transaction-service stripe-stand-in
           for target in 3001/health 3000/health; do
             for i in $(seq 1 60); do curl -fsS "http://127.0.0.1:${target}" > /dev/null 2>&1 && break; sleep 2; done
           done
