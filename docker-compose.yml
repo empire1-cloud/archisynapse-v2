@@ -12,6 +12,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d
+      - ./infra/postgres/zz_analytics_database.sql:/docker-entrypoint-initdb.d/zz_analytics_database.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -89,7 +90,9 @@ services:
     ports:
       - "8081:8081"
     environment:
-      ARCHISYNAPSE_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/archisynapse
+      # Own database: its `merchants` and `transactions` tables collide with
+      # the fraud service and the ledger. See infra/postgres/zz_analytics_database.sql
+      ARCHISYNAPSE_DATABASE_URL: postgresql+psycopg2://postgres:postgres@postgres:5432/archisynapse_analytics
       ARCHISYNAPSE_PEPPER: ${ARCHISYNAPSE_PEPPER:-dev-only-insecure-pepper}
     depends_on:
       postgres:
