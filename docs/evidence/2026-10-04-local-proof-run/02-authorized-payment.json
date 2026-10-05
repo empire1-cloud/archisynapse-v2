@@ -1,0 +1,103 @@
+{
+  "credits": "12.5000",
+  "debits": "12.5000",
+  "evidence_endpoint": {
+    "receipt": {
+      "_proof": {
+        "algorithm": "Ed25519",
+        "key_id": "receipt-proofrun-v1",
+        "payload_sha256": "70f4e57c33a1ddd4e14f27a9a43fef2365486c7dfd57829b6244f0350ed7c82a",
+        "public_key_b64": "q4R8En66zUQGGYOqaa9rriLc_hdE-l1mu6W3dYilLAA",
+        "signature_b64": "vsJswYK7qPAe77I5QjRahh1Zfh34yH-_3Mj96gPz4Hnae-G1fe5UgqM5rBMiw_5fgTExNEqgMBTYpjInuxW3BA"
+      },
+      "amount": 12.5,
+      "analytics_error": null,
+      "analytics_recorded": true,
+      "analytics_transaction_id": "1",
+      "correlation_id": "corr_457045f71134b26d",
+      "currency": "USD",
+      "customer_id": "6db72bab-603f-46fc-ba9f-5eb26c8a4224",
+      "economic_truth_action_id": null,
+      "economic_truth_authorization_receipt_id": null,
+      "error": null,
+      "event_id": "evt_44270ea070254f56",
+      "fee_amount": 0.5,
+      "fraud_decision": "approve",
+      "fraud_error": null,
+      "fraud_reasons": [],
+      "fraud_score": 0.0,
+      "idempotency_key": "proof-pay-25b85837",
+      "ledger_entries": [],
+      "ledger_error": null,
+      "ledger_transaction_id": "3c09f241-59a4-4cc7-bf74-bae5381d7246",
+      "merchant_id": "mer_06d93744d0ef2995c92222c6",
+      "occurred_at": "2026-10-04T20:24:36.719446+00:00",
+      "processed_at": null,
+      "status": "completed",
+      "transaction_error": null,
+      "transaction_id": "eb08bc66-ae01-4f57-a6b7-e51c1d0dc4ac"
+    },
+    "signature_valid": true,
+    "verification": "receipt signature is valid"
+  },
+  "http_status": 201,
+  "ledger_entries": [
+    {
+      "account_id": "40c364e0-20cc-4ba9-b73c-b0505d8cfc28",
+      "amount": "0.5000",
+      "debit_credit": "CREDIT"
+    },
+    {
+      "account_id": "3281a963-a7c4-48ef-9523-822ad7bf3827",
+      "amount": "12.0000",
+      "debit_credit": "CREDIT"
+    },
+    {
+      "account_id": "1a0c16e9-f8e7-47f5-bbc7-08859ca7d176",
+      "amount": "12.5000",
+      "debit_credit": "DEBIT"
+    }
+  ],
+  "response": {
+    "amount": 12.5,
+    "analytics_error": null,
+    "analytics_recorded": true,
+    "analytics_transaction_id": "1",
+    "correlation_id": "corr_457045f71134b26d",
+    "currency": "USD",
+    "customer_id": "6db72bab-603f-46fc-ba9f-5eb26c8a4224",
+    "economic_truth_action_id": null,
+    "economic_truth_authorization_receipt_id": null,
+    "error": null,
+    "event_id": "evt_44270ea070254f56",
+    "fee_amount": 0.5,
+    "fraud_decision": "approve",
+    "fraud_error": null,
+    "fraud_reasons": [],
+    "fraud_score": 0.0,
+    "idempotency_key": "proof-pay-25b85837",
+    "ledger_entries": [],
+    "ledger_error": null,
+    "ledger_transaction_id": "3c09f241-59a4-4cc7-bf74-bae5381d7246",
+    "merchant_id": "mer_06d93744d0ef2995c92222c6",
+    "occurred_at": "2026-10-04T20:24:36.719446+00:00",
+    "processed_at": null,
+    "status": "completed",
+    "transaction_error": null,
+    "transaction_id": "eb08bc66-ae01-4f57-a6b7-e51c1d0dc4ac"
+  },
+  "row_counts_after": {
+    "gateway_payment_receipts": 3,
+    "journal_entries": 3,
+    "payments": 1,
+    "refunds": 0,
+    "transactions": 1
+  },
+  "row_counts_before": {
+    "gateway_payment_receipts": 2,
+    "journal_entries": 0,
+    "payments": 0,
+    "refunds": 0,
+    "transactions": 0
+  }
+}
